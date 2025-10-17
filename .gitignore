@@ -1,0 +1,10 @@
+/.env
+/screenshots
+/downloads
+/analysis
+/venv
+/page_source.html
+/repost.csv
+nnn.py
+lll.py
+problems.txt
