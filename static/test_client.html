@@ -27,6 +27,13 @@
         #json-result { white-space: pre-wrap; font-family: "Courier New", Courier, monospace; height: 400px; overflow-y: auto; }
         #screenshots-container { display: flex; flex-wrap: wrap; gap: 1rem; }
         #screenshots-container img { max-width: 100%; border: 1px solid #ccc; border-radius: 4px; }
+        #input-request-area { padding: 1rem; background: #f8f9fa; border-radius: 8px; margin-bottom: 1rem; }
+        #input-request-area h3 { margin-top: 0; color: #e67e22; }
+        #input-prompt { font-weight: bold; margin-bottom: 1rem; }
+        #submit-input-btn { background-color: #e67e22; }
+        #submit-input-btn:hover { background-color: #d35400; }
+        #input-status { margin-top: 1rem; font-weight: bold; }
+        #no-input-request { text-align: center; color: #7f8c8d; padding: 2rem; }
         @media (min-width: 768px) {
             .controls { width: 33.33%; }
             .results-area { width: 66.67%; }
@@ -65,6 +72,7 @@
                     <button class="tab-button active" onclick="openTab(event, 'log-tab')">Live Log</button>
                     <button class="tab-button" onclick="openTab(event, 'result-tab')">Final JSON Result</button>
                     <button class="tab-button" onclick="openTab(event, 'screenshots-tab')">Screenshots</button>
+                    <button class="tab-button" onclick="openTab(event, 'input-tab')">User Input</button>
                 </div>
                 <div id="log-tab" class="tab-content active">
                     <pre id="log">Awaiting job start...</pre>
@@ -75,6 +83,26 @@
                 <div id="screenshots-tab" class="tab-content">
                     <div id="screenshots-container"></div>
                 </div>
+                <div id="input-tab" class="tab-content">
+                    <div id="user-input-container">
+                        <div id="input-request-area" style="display: none;">
+                            <h3>Agent Needs Your Input</h3>
+                            <p id="input-prompt"></p>
+                            <div class="input-group">
+                                <label for="user-input-field" id="input-label">Input:</label>
+                                <div style="position: relative;">
+                                    <input id="user-input-field" type="text" placeholder="Enter your input here...">
+                                    <button id="toggle-password-btn" type="button" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; display: none; font-size: 14px;">👁️</button>
+                                </div>
+                            </div>
+                            <button id="submit-input-btn">Submit Input</button>
+                            <div id="input-status"></div>
+                        </div>
+                        <div id="no-input-request">
+                            <p>No user input requests at the moment.</p>
+                        </div>
+                    </div>
+                </div>
             </div>
         </main>
     </div>
@@ -84,6 +112,19 @@
         const logEl = document.getElementById('log');
         const jsonResultEl = document.getElementById('json-result');
         const screenshotsContainer = document.getElementById('screenshots-container');
+        
+        // User input elements
+        const inputRequestArea = document.getElementById('input-request-area');
+        const noInputRequest = document.getElementById('no-input-request');
+        const inputPrompt = document.getElementById('input-prompt');
+        const inputLabel = document.getElementById('input-label');
+        const userInputField = document.getElementById('user-input-field');
+        const submitInputBtn = document.getElementById('submit-input-btn');
+        const inputStatus = document.getElementById('input-status');
+        const togglePasswordBtn = document.getElementById('toggle-password-btn');
+        
+        let currentJobId = null;
+        let inputCheckInterval = null;
 
         function openTab(evt, tabName) {
             Array.from(document.getElementsByClassName("tab-content")).forEach(tc => tc.style.display = "none");
@@ -92,11 +133,121 @@
             evt.currentTarget.className += " active";
         }
 
+        // Check for user input requests
+        async function checkForUserInputRequest(jobId) {
+            try {
+                const response = await fetch(`/user-input-request/${jobId}`);
+                if (response.ok) {
+                    const inputRequest = await response.json();
+                    showUserInputRequest(inputRequest);
+                } else if (response.status === 404) {
+                    hideUserInputRequest();
+                }
+            } catch (error) {
+                // No pending input request
+                hideUserInputRequest();
+            }
+        }
+
+        function showUserInputRequest(inputRequest) {
+            inputRequestArea.style.display = 'block';
+            noInputRequest.style.display = 'none';
+            
+            inputPrompt.textContent = inputRequest.prompt;
+            inputLabel.textContent = `${inputRequest.input_type.charAt(0).toUpperCase() + inputRequest.input_type.slice(1)}:`;
+            
+            // Set input type based on request
+            if (inputRequest.input_type === 'password') {
+                userInputField.type = 'password';
+                togglePasswordBtn.style.display = 'block';  // Show toggle for passwords
+            } else if (inputRequest.input_type === 'email') {
+                userInputField.type = 'email';
+                togglePasswordBtn.style.display = 'none';   // Hide toggle for non-passwords
+            } else if (inputRequest.input_type === 'phone') {
+                userInputField.type = 'tel';
+                togglePasswordBtn.style.display = 'none';   // Hide toggle for non-passwords
+            } else {
+                userInputField.type = 'text';
+                togglePasswordBtn.style.display = 'none';   // Hide toggle for non-passwords
+            }
+            
+            userInputField.value = '';
+            userInputField.focus();
+            inputStatus.textContent = '';
+            
+            // Highlight the tab to draw attention
+            const inputTab = document.querySelector('[onclick="openTab(event, \'input-tab\')"]');
+            inputTab.style.backgroundColor = '#e67e22';
+            inputTab.style.color = 'white';
+            
+            // Switch to input tab automatically
+            inputTab.click();
+        }
+
+        function hideUserInputRequest() {
+            inputRequestArea.style.display = 'none';
+            noInputRequest.style.display = 'block';
+            
+            // Reset tab highlighting
+            const inputTab = document.querySelector('[onclick="openTab(event, \'input-tab\')"]');
+            inputTab.style.backgroundColor = '';
+            inputTab.style.color = '';
+        }
+
+        submitInputBtn.onclick = async () => {
+            if (!currentJobId || !userInputField.value.trim()) {
+                inputStatus.textContent = 'Please enter a value.';
+                inputStatus.style.color = 'red';
+                return;
+            }
+
+            submitInputBtn.disabled = true;
+            inputStatus.textContent = 'Submitting...';
+            inputStatus.style.color = 'blue';
+
+            try {
+                const response = await fetch('/user-input-response', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        job_id: currentJobId,
+                        input_value: userInputField.value.trim()
+                    })
+                });
+
+                if (response.ok) {
+                    inputStatus.textContent = 'Input submitted! Agent will resume...';
+                    inputStatus.style.color = 'green';
+                    hideUserInputRequest();
+                    
+                    // Switch back to log tab
+                    document.querySelector('[onclick="openTab(event, \'log-tab\')"]').click();
+                } else {
+                    const error = await response.json();
+                    inputStatus.textContent = `Error: ${error.detail}`;
+                    inputStatus.style.color = 'red';
+                }
+            } catch (error) {
+                inputStatus.textContent = `Failed to submit: ${error}`;
+                inputStatus.style.color = 'red';
+            } finally {
+                submitInputBtn.disabled = false;
+            }
+        };
+
+        // Allow Enter key to submit input
+        userInputField.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                submitInputBtn.click();
+            }
+        });
+
         startBtn.onclick = async () => {
             startBtn.disabled = true;
             logEl.textContent = 'Initializing job...\n';
             jsonResultEl.textContent = '{}';
             screenshotsContainer.innerHTML = '';
+            hideUserInputRequest();
 
             const body = {
                 url: document.getElementById('url').value,
@@ -112,7 +263,13 @@
                     body: JSON.stringify(body)
                 });
                 const data = await res.json();
+                currentJobId = data.job_id;
                 logEl.textContent = `Job started with ID: ${data.job_id}\nConnecting to stream...\n`;
+
+                // Start checking for user input requests
+                inputCheckInterval = setInterval(() => {
+                    checkForUserInputRequest(currentJobId);
+                }, 2000);
 
                 const es = new EventSource(data.stream_url);
 
@@ -122,9 +279,16 @@
                     logEl.textContent += `\n[${msg.ts}] ${msg.msg}\n${details}\n`;
                     logEl.scrollTop = logEl.scrollHeight;
 
+                    // Check for user input required message
+                    if (msg.msg === 'user_input_required') {
+                        checkForUserInputRequest(currentJobId);
+                    }
+
                     if (msg.msg === 'job_done' || msg.msg === 'job_failed') {
                         es.close();
                         startBtn.disabled = false;
+                        clearInterval(inputCheckInterval);
+                        hideUserInputRequest();
                         fetchAndDisplayResults(data.result_url);
                     }
                 };
@@ -133,6 +297,8 @@
                     logEl.textContent += '\nStream connection error. Job may have finished or failed.';
                     es.close();
                     startBtn.disabled = false;
+                    clearInterval(inputCheckInterval);
+                    hideUserInputRequest();
                     fetchAndDisplayResults(data.result_url);
                 };
 
@@ -140,7 +306,20 @@
                 logEl.textContent += `\nFailed to start job: ${error}`;
                 startBtn.disabled = false;
             }
-        };
+        }
+        
+        // Password visibility toggle functionality
+        togglePasswordBtn.addEventListener('click', function() {
+            if (userInputField.type === 'password') {
+                userInputField.type = 'text';
+                togglePasswordBtn.textContent = '🙈';  // Hide icon
+                togglePasswordBtn.title = 'Hide password';
+            } else {
+                userInputField.type = 'password';
+                togglePasswordBtn.textContent = '👁️';  // Show icon
+                togglePasswordBtn.title = 'Show password';
+            }
+        });
         
         async function fetchAndDisplayResults(resultUrl) {
             try {

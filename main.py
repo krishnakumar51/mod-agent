@@ -28,9 +28,43 @@ from config import SCREENSHOTS_DIR, ANTHROPIC_MODEL, GROQ_MODEL, OPENAI_MODEL
 # --- FastAPI App Initialization ---
 app = FastAPI(title="LangGraph Web Agent with Memory")
 
+# --- NEW: Helper functions for enhanced HITL ---
+
+def detect_login_failure(page_content: str, page_url: str) -> bool:
+    """Detect if a login attempt has failed based on page content and URL."""
+    failure_indicators = [
+        "invalid credentials", "login failed", "incorrect password", 
+        "incorrect username", "authentication failed", "login error",
+        "wrong password", "invalid login", "access denied", "login unsuccessful",
+        "incorrect email", "invalid email", "user not found", "account not found",
+        "too many attempts", "account locked", "temporarily locked"
+    ]
+    
+    url_indicators = [
+        "/login", "/signin", "/auth", "/error", "/failure"
+    ]
+    
+    content_lower = page_content.lower()
+    url_lower = page_url.lower()
+    
+    # Check for failure text in content
+    content_has_failure = any(indicator in content_lower for indicator in failure_indicators)
+    
+    # Check if still on login/auth page (might indicate failure)
+    still_on_auth_page = any(indicator in url_lower for indicator in url_indicators)
+    
+    return content_has_failure or still_on_auth_page
+
+
 # --- In-Memory Job Storage ---
 JOB_QUEUES = {}
 JOB_RESULTS = {}
+# NEW: Human-in-the-loop storage
+USER_INPUT_REQUESTS = {}  # job_id -> UserInputRequest
+USER_INPUT_RESPONSES = {}  # job_id -> user_provided_value
+PENDING_JOBS = {}  # job_id -> asyncio.Event for resuming
+# NEW: Track jobs that are in user input flow to prevent interference
+JOBS_IN_INPUT_FLOW = set()  # job_ids currently in user input flow
 
 # --- NEW: Token Cost Analysis Configuration ---
 ANALYSIS_DIR = Path("analysis")
@@ -69,6 +103,34 @@ def push_status(job_id: str, msg: str, details: dict = None):
         entry = {"ts": get_current_timestamp(), "msg": msg}
         if details: entry["details"] = details
         q.put_nowait(entry)
+
+# NEW: Helper function for cleaning up stuck human-in-the-loop jobs
+def cleanup_stuck_jobs():
+    """Clean up jobs that might be stuck waiting for user input"""
+    current_time = time.time()
+    stuck_jobs = []
+    
+    for job_id, request in list(USER_INPUT_REQUESTS.items()):
+        # Check if request is older than 10 minutes (600 seconds)
+        request_time = request.get('timestamp', '')
+        if request_time:
+            try:
+                request_timestamp = time.mktime(time.strptime(request_time, "%Y-%m-%dT%H:%M:%SZ"))
+                if current_time - request_timestamp > 600:  # 10 minutes
+                    stuck_jobs.append(job_id)
+            except:
+                stuck_jobs.append(job_id)
+    
+    for job_id in stuck_jobs:
+        print(f"Cleaning up stuck job: {job_id}")
+        USER_INPUT_REQUESTS.pop(job_id, None)
+        USER_INPUT_RESPONSES.pop(job_id, None)
+        JOBS_IN_INPUT_FLOW.discard(job_id)  # Remove from global protection
+        if job_id in PENDING_JOBS:
+            PENDING_JOBS[job_id].set()  # Release the waiting job
+            PENDING_JOBS.pop(job_id, None)
+    
+    return len(stuck_jobs)
 
 def resize_image_if_needed(image_path: Path, max_dimension: int = 2000):
     try:
@@ -534,6 +596,16 @@ class SearchRequest(BaseModel):
     top_k: int
     llm_provider: LLMProvider = LLMProvider.ANTHROPIC
 
+class UserInputRequest(BaseModel):
+    job_id: str
+    input_type: str  # "text", "password", "otp", "email", "phone"
+    prompt: str
+    is_sensitive: bool = False
+
+class UserInputResponse(BaseModel):
+    job_id: str
+    input_value: str
+
 # --- LangGraph Agent State with Memory ---
 class AgentState(TypedDict):
     job_id: str
@@ -554,6 +626,11 @@ class AgentState(TypedDict):
     found_element_context: dict # NEW: To store context about found elements
     failed_actions: Dict[str, int] # NEW: signature -> failure count
     attempted_action_signatures: List[str] # NEW: chronological list of attempted signatures
+    # NEW: Human-in-the-loop state
+    waiting_for_user_input: bool
+    user_input_request: dict  # Stores the current input request
+    user_input_response: str  # Stores the user's response
+    user_input_flow_active: bool  # NEW: Tracks if we're in a user input flow to prevent interference
 
 # --- NEW: Stable action signature builder ---
 def make_action_signature(action: dict) -> str:
@@ -585,16 +662,41 @@ async def navigate_to_page(state: AgentState) -> AgentState:
         print(f"Navigation failed: {e}")
         # Still continue with the process even if navigation partially fails
     
-    try:
-        inputs = await state['page'].query_selector_all('input')
-        for inp in inputs:
-            try:
-                if await inp.is_enabled() and await inp.is_visible():
-                    await inp.fill("")
-            except Exception as e:
-                print(f"Failed to clear input field: {e}")
-    except Exception as e:
-        print(f"Failed to clear input fields: {e}")
+    # Only clear input fields once during initial navigation (step 1)
+    # Don't clear if we're waiting for or have received user input
+    should_clear_inputs = (
+        state['step'] == 1 and 
+        not state.get('waiting_for_user_input', False) and 
+        not state.get('user_input_response') and
+        not state.get('user_input_flow_active', False) and
+        state['job_id'] not in JOBS_IN_INPUT_FLOW  # Global protection
+    )
+    
+    # DEBUG: Add comprehensive logging for input clearing decision
+    print(f"🧹 INPUT CLEARING DEBUG - Job {state['job_id']}")
+    print(f"   step: {state['step']}")
+    print(f"   waiting_for_user_input: {state.get('waiting_for_user_input', False)}")
+    print(f"   user_input_response: '{state.get('user_input_response', 'None')}'")
+    print(f"   user_input_flow_active: {state.get('user_input_flow_active', False)}")
+    print(f"   job_id in JOBS_IN_INPUT_FLOW: {state['job_id'] in JOBS_IN_INPUT_FLOW}")
+    print(f"   should_clear_inputs: {should_clear_inputs}")
+    
+    if should_clear_inputs:
+        try:
+            inputs = await state['page'].query_selector_all('input')
+            clear_count = 0
+            for inp in inputs:
+                try:
+                    if await inp.is_enabled() and await inp.is_visible():
+                        await inp.fill("")
+                        clear_count += 1
+                except Exception as e:
+                    print(f"Failed to clear input field: {e}")
+            print(f"   ✅ Cleared {clear_count} input fields during initial navigation")
+        except Exception as e:
+            print(f"   ❌ Failed to clear input fields: {e}")
+    else:
+        print(f"   ⏭️ Skipping input clearing (protection active)")
 
     return state
 
@@ -633,6 +735,26 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
 
     # Enhanced history formatting with element context
     history_text = "\n".join(state['history'])
+
+    # --- NEW: Add user input context if available ---
+    if state.get('user_input_response'):
+        input_type = state.get('user_input_request', {}).get('input_type', 'input')
+        is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
+        
+        if is_sensitive:
+            # For sensitive data, provide clear instruction with the actual value
+            # The LLM needs to see the actual value to use it correctly
+            history_text += f"\n\n🔐 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [SENSITIVE DATA - USE THIS EXACT VALUE]"
+            history_text += f"\n💡 CRITICAL: Use this exact value '{state['user_input_response']}' in your next fill action."
+            history_text += f"\n🚨 DO NOT GENERATE YOUR OWN {input_type.upper()}! Use '{state['user_input_response']}' exactly as provided."
+            history_text += f"\n❌ DO NOT use placeholders like {{{{USER_INPUT}}}} - use the actual value '{state['user_input_response']}' directly."
+        else:
+            # Show non-sensitive data and clear instruction
+            history_text += f"\n\n👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [Ready to use in next fill action]"
+            history_text += f"\n💡 IMPORTANT: Use this exact value '{state['user_input_response']}' in your next fill action."
+            history_text += f"\n❌ DO NOT use placeholders like {{{{USER_INPUT}}}} - use the actual value '{state['user_input_response']}' directly."
+        
+        # DON'T reset user input here - it will be cleared after being used in fill action
 
     # --- NEW: Inject anti-repeat guidance if we have failed actions ---
     if state.get('failed_actions'):
@@ -691,6 +813,16 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             screenshot_path=screenshot_path if screenshot_success else None,
             history=history_text
         )
+        
+        # DEBUG: Log the raw LLM response to understand what's being returned
+        print(f"🤖 LLM RESPONSE DEBUG - Job {job_id}:")
+        print(f"   action_response: {action_response}")
+        if action_response and isinstance(action_response, dict):
+            action = action_response.get("action")
+            if action and action.get("type") == "fill":
+                print(f"   🔍 FILL ACTION DETECTED:")
+                print(f"      text: '{action.get('text', 'None')}'")
+                print(f"      selector: '{action.get('selector', 'None')}'")
         
         # NEW: Store usage for this step
         state['token_usage'].append({
@@ -786,7 +918,78 @@ async def execute_action_node(state: AgentState) -> AgentState:
         if action_type == "click":
             await page.locator(action["selector"]).click(timeout=2000)
         elif action_type == "fill":
-            await page.locator(action["selector"]).fill(action["text"], timeout=7000)
+            # NEW: Enhanced fill action that can use user-provided input
+            fill_text = action["text"]
+            used_user_input = False
+            
+            # DEBUG: Add comprehensive logging for fill actions
+            print(f"🔍 FILL DEBUG - Job {job_id}")
+            print(f"   Original fill_text: '{fill_text}'")
+            print(f"   user_input_response: '{state.get('user_input_response', 'None')}'")
+            print(f"   user_input_flow_active: {state.get('user_input_flow_active', False)}")
+            print(f"   selector: '{action.get('selector', 'None')}'")
+            
+            # Check if this is a placeholder that should use user input
+            if fill_text in ["{{USER_INPUT}}", "{{PASSWORD}}", "{{EMAIL}}", "{{PHONE}}", "{{OTP}}"]:
+                if state.get('user_input_response'):
+                    fill_text = state['user_input_response']
+                    used_user_input = True
+                    state['history'].append(f"Step {state['step']}: 🔄 Using user-provided input via placeholder")
+                    print(f"   🔄 Replaced placeholder with user input: '{fill_text}'")
+                else:
+                    # No user input available, this shouldn't happen but handle gracefully
+                    raise ValueError(f"Placeholder {fill_text} requires user input but none available")
+            
+            # Check if the agent is directly using the user input value
+            elif state.get('user_input_response') and fill_text == state['user_input_response']:
+                used_user_input = True
+                state['history'].append(f"Step {state['step']}: 🔄 Using user-provided input directly")
+                print(f"   ✅ Direct match with user input")
+            
+            # FORCE USER INPUT FOR PASSWORD FIELDS: If we have user input and this is a password field, use it
+            elif (state.get('user_input_response') and 
+                  ('password' in action.get('selector', '').lower() or 
+                   'pass' in action.get('selector', '').lower() or
+                   action.get('selector', '') in ['#password', '[type="password"]'] or
+                   '[type="password"]' in action.get('selector', '')) and
+                  state.get('user_input_request', {}).get('input_type') == 'password'):
+                print(f"   🔒 FORCING USER PASSWORD: LLM tried to use '{fill_text}' but overriding with user input")
+                fill_text = state['user_input_response']
+                used_user_input = True
+                state['history'].append(f"Step {state['step']}: 🔒 FORCED user password instead of LLM-generated value")
+                print(f"   🔄 OVERRODE LLM password with user input: '{fill_text}'")
+                
+            # ADDITIONAL CHECK: If user provided password recently and this looks like a password field
+            elif (state.get('user_input_response') and 
+                  state.get('user_input_request', {}).get('input_type') == 'password' and
+                  (len(fill_text) > 6 and any(c.isdigit() for c in fill_text) and any(c.isupper() for c in fill_text))):
+                # This looks like a generated password pattern, override it
+                print(f"   🔒 SUSPICIOUS PASSWORD PATTERN: Overriding '{fill_text}' with user input")
+                fill_text = state['user_input_response']
+                used_user_input = True
+                state['history'].append(f"Step {state['step']}: 🔒 OVERRODE suspicious password pattern with user input")
+                print(f"   🔄 PATTERN OVERRIDE: '{fill_text}'")
+            
+            print(f"   Final fill_text: '{fill_text}'")
+            
+            # Add longer delay before filling to ensure page is ready, especially for password fields
+            if 'password' in action.get('selector', '').lower() or used_user_input:
+                await page.wait_for_timeout(2000)  # Extra time for password fields
+            else:
+                await page.wait_for_timeout(1000)
+            
+            await page.locator(action["selector"]).fill(fill_text, timeout=10000)  # Increased timeout
+            
+            # Add a small delay after filling to prevent immediate clearing
+            await page.wait_for_timeout(500)
+            
+            # If we used user input, clean up the state
+            if used_user_input:
+                state['user_input_response'] = ""
+                state['user_input_request'] = {}
+                state['user_input_flow_active'] = False
+                JOBS_IN_INPUT_FLOW.discard(job_id)  # Remove from global protection
+                state['history'].append(f"Step {state['step']}: ✅ User input successfully used in form field, flow complete")
         elif action_type == "press":
             await page.locator(action["selector"]).press(action["key"],timeout=2000)
         elif action_type == "scroll":
@@ -896,6 +1099,72 @@ async def execute_action_node(state: AgentState) -> AgentState:
                 state['history'].append(f"Step {state['step']}: ❌ NO ELEMENTS FOUND! Text: '{search_text}' - No elements contain this text in their attributes")
                 print(f"🔍 ELEMENT SEARCH DEBUG: No elements found containing '{search_text}'")
 
+        elif action_type == "request_user_input":
+            # NEW: Human-in-the-loop implementation
+            input_type = action.get("input_type", "text")
+            prompt = action.get("prompt", "Please provide input")
+            is_sensitive = action.get("is_sensitive", False)
+            
+            # Create user input request
+            user_input_request = {
+                "input_type": input_type,
+                "prompt": prompt,
+                "is_sensitive": is_sensitive,
+                "timestamp": get_current_timestamp(),
+                "step": state['step']
+            }
+            
+            # Store the request globally for API access
+            USER_INPUT_REQUESTS[job_id] = user_input_request
+            state['user_input_request'] = user_input_request
+            state['waiting_for_user_input'] = True
+            state['user_input_flow_active'] = True  # Mark that we're in a user input flow
+            JOBS_IN_INPUT_FLOW.add(job_id)  # Global protection against field clearing
+            
+            # Create an event to wait for user input
+            input_event = asyncio.Event()
+            PENDING_JOBS[job_id] = input_event
+            
+            # Notify the user through status
+            push_status(job_id, "user_input_required", {
+                "input_type": input_type,
+                "prompt": prompt,
+                "is_sensitive": is_sensitive,
+                "message": f"Agent needs user input: {prompt}"
+            })
+            
+            state['history'].append(f"Step {state['step']}: 🔄 WAITING FOR USER INPUT - {prompt}")
+            
+            # Wait for user input with timeout
+            try:
+                await asyncio.wait_for(input_event.wait(), timeout=300)  # 5 minute timeout
+                
+                # Get the user's response
+                user_response = USER_INPUT_RESPONSES.get(job_id, "")
+                state['user_input_response'] = user_response
+                state['waiting_for_user_input'] = False
+                # Keep user_input_flow_active=True until the input is actually used
+                
+                # Clear the request from memory
+                USER_INPUT_REQUESTS.pop(job_id, None)
+                USER_INPUT_RESPONSES.pop(job_id, None)
+                PENDING_JOBS.pop(job_id, None)
+                
+                state['history'].append(f"Step {state['step']}: ✅ USER INPUT RECEIVED - {input_type} provided, ready for next action")
+                push_status(job_id, "user_input_received", {"input_type": input_type})
+                
+            except asyncio.TimeoutError:
+                # Handle timeout
+                state['waiting_for_user_input'] = False
+                state['user_input_flow_active'] = False  # Reset flow on timeout
+                JOBS_IN_INPUT_FLOW.discard(job_id)  # Remove from global protection
+                USER_INPUT_REQUESTS.pop(job_id, None)
+                PENDING_JOBS.pop(job_id, None)
+                
+                state['history'].append(f"Step {state['step']}: ⏰ USER INPUT TIMEOUT - Continuing without input")
+                push_status(job_id, "user_input_timeout", {"message": "User input request timed out after 5 minutes"})
+                raise ValueError(f"User input request timed out after 5 minutes: {prompt}")
+
         elif action_type == "close_popup":
             soup = BeautifulSoup(await page.content(), 'html.parser')
 
@@ -934,6 +1203,32 @@ async def execute_action_node(state: AgentState) -> AgentState:
         # Record failure
         state['failed_actions'][action_signature] = state['failed_actions'].get(action_signature, 0) + 1
         
+    # NEW: Check for login failures after actions that might be login-related
+    page = state['page']
+    if action.get("type") in ["click", "press"] and any(keyword in action_signature.lower() for keyword in ["login", "submit", "sign", "enter"]):
+        try:
+            # Wait a moment for the page to respond
+            await page.wait_for_timeout(2000)
+            page_content = await page.content()
+            page_url = page.url
+            
+            if detect_login_failure(page_content, page_url):
+                print(f"🚫 LOGIN FAILURE DETECTED - Job {job_id}")
+                print(f"   URL: {page_url}")
+                
+                # Add failure info to history for LLM context
+                state['history'].append(f"Step {state['step']}: 🚫 LOGIN FAILURE DETECTED - The login attempt appears to have failed. The page still shows login form or error messages.")
+                
+                # Mark that we should request new credentials
+                failure_context = {
+                    "login_failed": True,
+                    "failure_url": page_url,
+                    "step": state['step']
+                }
+                push_status(job_id, "login_failure_detected", failure_context)
+        except Exception as e:
+            print(f"Error checking for login failure: {e}")
+        
     state['step'] += 1
     state['history'] = state['history']
     return state
@@ -949,6 +1244,11 @@ def supervisor_node(state: AgentState) -> str:
     if state['step'] > state['max_steps']:
         push_status(state['job_id'], "agent_stopped", {"reason": "Max steps reached."})
         return END
+    # NEW: Handle human-in-the-loop scenario
+    if state.get('waiting_for_user_input', False):
+        # This shouldn't happen as we handle input in execute_action_node
+        # But if it does, continue reasoning to process the received input
+        return "continue"
     return "continue"
 
 # --- Build the Graph ---
@@ -963,7 +1263,8 @@ builder.add_edge("reason", "execute")
 graph_app = builder.compile()
 
 # --- The Core Job Orchestrator ---
-async def run_job(job_id: str, payload: dict, device_id: str = "ZD222GXYPV", ):
+# async def run_job(job_id: str, payload: dict, device_id: str = "ZD222GXYPV", ):
+async def run_job(job_id: str, payload: dict, device_id: str = "emulator-5554", ):
 
     device_id = payload.get("device_id", device_id)
     url = payload.get('query', '')
@@ -1039,7 +1340,12 @@ async def run_job(job_id: str, payload: dict, device_id: str = "ZD222GXYPV", ):
                 token_usage=[], # Initialize empty token usage list
                 found_element_context={}, # Initialize empty element context
                 failed_actions={}, # NEW: track failed action signatures
-                attempted_action_signatures=[] # NEW: chronological list
+                attempted_action_signatures=[], # NEW: chronological list
+                # NEW: Human-in-the-loop state
+                waiting_for_user_input=False,
+                user_input_request={},
+                user_input_response="",
+                user_input_flow_active=False
             )
             initial_state['job_artifacts_dir'].mkdir(exist_ok=True)
             
@@ -1069,7 +1375,7 @@ async def start_search(req: SearchRequest):
     JOB_QUEUES[job_id] = asyncio.Queue()
     # loop = asyncio.get_event_loop()
     # loop.run_in_executor(None, run_job, job_id, req.dict())
-    asyncio.create_task(run_job(job_id, {**req.model_dump(), "device_id": "10.147.65.232:5555"}))
+    asyncio.create_task(run_job(job_id, {**req.model_dump(), "device_id": "emulator-5554"}))
     return {"job_id": job_id, "stream_url": f"/stream/{job_id}", "result_url": f"/result/{job_id}"}
 
 @app.get("/stream/{job_id}")
@@ -1096,6 +1402,76 @@ async def get_screenshot(job_id: str, filename: str):
     file_path = SCREENSHOTS_DIR / job_id / filename
     if not file_path.exists(): raise HTTPException(status_code=404, detail="Screenshot not found")
     return FileResponse(file_path)
+
+# NEW: Human-in-the-loop API endpoints
+@app.get("/user-input-request/{job_id}")
+async def get_user_input_request(job_id: str):
+    """Get pending user input request for a job"""
+    if job_id not in USER_INPUT_REQUESTS:
+        raise HTTPException(status_code=404, detail="No pending user input request for this job")
+    
+    return {"job_id": job_id, **USER_INPUT_REQUESTS[job_id]}
+
+@app.post("/user-input-response")
+async def submit_user_input(response: UserInputResponse):
+    """Submit user input response to resume job execution"""
+    job_id = response.job_id
+    
+    if job_id not in USER_INPUT_REQUESTS:
+        raise HTTPException(status_code=404, detail="No pending user input request for this job")
+    
+    if job_id not in PENDING_JOBS:
+        raise HTTPException(status_code=400, detail="Job is not waiting for user input")
+    
+    # Store the user's response
+    USER_INPUT_RESPONSES[job_id] = response.input_value
+    
+    # Signal the waiting job to continue
+    event = PENDING_JOBS[job_id]
+    event.set()
+    
+    return {"status": "success", "message": "User input received, job will resume"}
+
+@app.get("/jobs/{job_id}/status")
+async def get_job_status(job_id: str):
+    """Get comprehensive job status including user input requirements"""
+    status = {
+        "job_id": job_id,
+        "has_result": job_id in JOB_RESULTS,
+        "waiting_for_input": job_id in USER_INPUT_REQUESTS,
+        "is_running": job_id in JOB_QUEUES
+    }
+    
+    if job_id in USER_INPUT_REQUESTS:
+        status["input_request"] = USER_INPUT_REQUESTS[job_id]
+    
+    if job_id in JOB_RESULTS:
+        status["result"] = JOB_RESULTS[job_id]
+    
+    return status
+
+@app.post("/admin/cleanup-stuck-jobs")
+async def cleanup_stuck_jobs_endpoint():
+    """Clean up jobs that are stuck waiting for user input (admin endpoint)"""
+    cleaned_count = cleanup_stuck_jobs()
+    return {
+        "status": "success",
+        "message": f"Cleaned up {cleaned_count} stuck job(s)",
+        "cleaned_jobs": cleaned_count
+    }
+
+@app.get("/admin/system-status")
+async def get_system_status():
+    """Get overall system status including pending jobs and input requests"""
+    return {
+        "active_jobs": len(JOB_QUEUES),
+        "completed_jobs": len(JOB_RESULTS),
+        "pending_input_requests": len(USER_INPUT_REQUESTS),
+        "pending_responses": len(USER_INPUT_RESPONSES),
+        "jobs_in_input_flow": len(JOBS_IN_INPUT_FLOW),
+        "input_flow_jobs": list(JOBS_IN_INPUT_FLOW),
+        "stuck_jobs_cleaned": cleanup_stuck_jobs()
+    }
 
 @app.get("/")
 async def client_ui():
