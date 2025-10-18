@@ -26,7 +26,7 @@ User's Target URL: {url}
 User's Query: "{query}"
 
 Based on this, generate a single, clear instruction.
-Example: "Find the top 5 smartphones under ₹50,000 on flipkart.com, collecting their name, price, and URL."
+Example: "Find the top 5 smartphones under â‚¹50,000 on flipkart.com, collecting their name, price, and URL."
 Refined Instruction:
 """
 
@@ -43,7 +43,7 @@ You operate in a step-by-step manner. At each step, analyze the current state of
 
 **Your Task:**
 1.  **PRIORITY #1: POP-UP CHECK:** Before anything else, examine the screenshot for pop-ups, cookie banners, login modals, or any other interruptions. If you see one, your ONLY goal for this step is to dismiss it using the `dismiss_popup_using_text` tool. Look for buttons with text like "Accept", "Close", "Continue", "Got it", "Maybe later"..
-2.  **Think:** If there are no pop-ups, analyze the situation. Also if there is a popup but that is small and not blocking the process then ignore it and don't try to close it. Only if the popup appears on the main content area and the background is blurred or dark then only consider closing it. Review your history. If your history shows "🎯 COMPREHENSIVE ELEMENT SEARCH RESULTS...", pay close attention to the provided selectors and use them immediately for interaction. If your last action failed, identify why and devise a new strategy. What is your immediate goal?
+2.  **Think:** If there are no pop-ups, analyze the situation. Also if there is a popup but that is small and not blocking the process then ignore it and don't try to close it. Only if the popup appears on the main content area and the background is blurred or dark then only consider closing it. Review your history. If your history shows "ðŸŽ¯ COMPREHENSIVE ELEMENT SEARCH RESULTS...", pay close attention to the provided selectors and use them immediately for interaction. If your last action failed, identify why and devise a new strategy. What is your immediate goal?
 3.  **Act:** Choose ONE action from the available tools to move closer to the user's objective.
 
 **Available Tools (Action JSON format):**
@@ -84,10 +84,10 @@ Example Response for using user input:
 ```
 
 **CRITICAL: When you see user input in your history like:**
-- "👤 USER PROVIDED EMAIL: user@example.com [Ready to use in next fill action]"
-- "🔐 USER PROVIDED PASSWORD: [SENSITIVE DATA PROVIDED - Ready to use in next fill action]"
+- "ðŸ‘¤ USER PROVIDED EMAIL: user@example.com [Ready to use in next fill action]"
+- "ðŸ” USER PROVIDED PASSWORD: [SENSITIVE DATA PROVIDED - Ready to use in next fill action]"
 
-**🚨 ABSOLUTELY CRITICAL - USER INPUT USAGE RULE:**
+**ðŸš¨ ABSOLUTELY CRITICAL - USER INPUT USAGE RULE:**
 When you see user-provided input in your history, you MUST extract and use the EXACT VALUE from your history text. 
 
 **DO NOT GENERATE OR MAKE UP VALUES. ONLY USE WHAT THE USER ACTUALLY PROVIDED.**
@@ -135,8 +135,8 @@ Based on the provided HTML, screenshot, and your recent history, what is your ne
 
 **IMPORTANT NOTES:**
 - Always use the magic tool `extract_correct_selector_using_text` first to find selectors for elements you want to interact with.
-- If your history contains "🎯 IMPORTANT CONTEXT: Element found in previous step!", you MUST use the provided "Ready-to-use Selector" immediately with click, fill, or press action. Do NOT use extract_correct_selector_using_text again for the same element.
-- When you see a suggested selector in your history (e.g., "💡 NEXT ACTION SUGGESTION: Use selector '...'"), follow that suggestion immediately.
+- If your history contains "ðŸŽ¯ IMPORTANT CONTEXT: Element found in previous step!", you MUST use the provided "Ready-to-use Selector" immediately with click, fill, or press action. Do NOT use extract_correct_selector_using_text again for the same element.
+- When you see a suggested selector in your history (e.g., "ðŸ’¡ NEXT ACTION SUGGESTION: Use selector '...'"), follow that suggestion immediately.
 - If the user wants to get any list of items (products, articles, etc.): then use only the search box on the website to search for the required items. Do not try to navigate using menus, categories, filters or click on any buttons etc. Just use the search box to search for the required items.
 - Always try searching in the search box of any websites provided by the user. After searching if you get results then do not try to sort or filter the results. Just extract the required information from the results page or scroll down to load more results and then extract the required information.
 - If you are able to extract the information without requiring any login, do not try to login or signup. But if you are not able to extract the information without login, then you can try to login or signup. The login or signup credentials will be provided by the user in the query. Do not try to login with any third party services like google, facebook, etc. Do not scroll down at this moment. If you are not able to find the required information without scrolling down, then you can try login or signup. After logging in or signing up, you can then scroll down to find the required information.
@@ -144,10 +144,10 @@ Based on the provided HTML, screenshot, and your recent history, what is your ne
   - Login forms requiring username/password (not provided in query)
   - OTP/verification codes from SMS or email
   - Personal information like phone numbers, addresses
-  - **LOGIN FAILURE RECOVERY:** If your history shows "🚫 LOGIN FAILURE DETECTED", the previous credentials were incorrect. Request new credentials with a message like "The previous login credentials were incorrect. Please provide the correct username/email and password."
+  - **LOGIN FAILURE RECOVERY:** If your history shows "ðŸš« LOGIN FAILURE DETECTED", the previous credentials were incorrect. Request new credentials with a message like "The previous login credentials were incorrect. Please provide the correct username/email and password."
 
 **LOGIN FAILURE HANDLING:**
-- If you see "🚫 LOGIN FAILURE DETECTED" in your history, this means the previous login attempt failed
+- If you see "ðŸš« LOGIN FAILURE DETECTED" in your history, this means the previous login attempt failed
 - You should immediately request NEW credentials from the user using `request_user_input`
 - Use clear prompts like: "The previous login failed. Please provide the correct email address" or "The previous password was incorrect. Please provide the correct password"
 - Do NOT reuse credentials that have already failed - always request fresh ones
@@ -172,7 +172,7 @@ def get_agent_action(query: str, url: str, html: str, provider: LLMProvider, scr
     # Add note about screenshot availability
     screenshot_note = ""
     if not screenshot_path:
-        screenshot_note = "\n\n**⚠️ NOTE: Screenshot capture failed - relying on HTML content only for analysis.**"
+        screenshot_note = "\n\n**âš ï¸ NOTE: Screenshot capture failed - relying on HTML content only for analysis.**"
     
     prompt = AGENT_PROMPT.format(query=query, url=url, history=history or "No actions taken yet.") + screenshot_note
     system_prompt = "You are an autonomous web agent. Respond ONLY with the JSON object containing your thought and action."
