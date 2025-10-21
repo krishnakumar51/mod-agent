@@ -8,16 +8,24 @@ import csv
 from pathlib import Path
 from urllib.parse import urljoin
 import traceback
-from typing import List, TypedDict, Dict, Any
-import logger
+from typing import List, TypedDict, Dict, Any, Optional
+import logging
+import aiohttp
 import subprocess
-from core import force_stop_chrome, forward_port, get_devtools_port, start_chrome_incognito, start_chrome_normal, wait_for_devtools
+from core import (
+    force_stop_browser, start_firefox_private, enable_firefox_debugging, 
+    get_devtools_port, wait_for_devtools, forward_port, 
+    setup_firefox_automation_v2, force_stop_chrome, start_chrome_incognito, 
+    start_chrome_normal, setup_chrome_automation_android, CaptchaSolver
+)
+# from captcha_handler import (
+#     auto_solve_captcha_if_present, smart_captcha_handler, 
+#     handle_captcha_on_page, handle_captcha_immediately
+# )
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
-from playwright.async_api import async_playwright, Page, Browser
-from playwright_stealth import Stealth
-from undetected_playwright import Malenia
+from patchright.async_api import async_playwright, Page, Browser  # 🔥 NEW: Cloudflare bypass
 from PIL import Image
 from langgraph.graph import StateGraph, END
 from bs4 import BeautifulSoup
@@ -25,47 +33,23 @@ from bs4 import BeautifulSoup
 from llm import LLMProvider, get_refined_prompt, get_agent_action
 from config import SCREENSHOTS_DIR, ANTHROPIC_MODEL, GROQ_MODEL, OPENAI_MODEL
 
-# --- FastAPI App Initialization ---
+# ==================== SETUP ====================
 app = FastAPI(title="LangGraph Web Agent with Memory")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ==================== COPY DIRECTLY FROM HERE ====================
-# --- Helper functions for enhanced HITL ---
-def detect_login_failure(page_content: str, page_url: str) -> bool:
-    """Detect if a login attempt has failed based on page content and URL."""
-    failure_indicators = [
-        "invalid credentials", "login failed", "incorrect password", 
-        "incorrect username", "authentication failed", "login error",
-        "wrong password", "invalid login", "access denied", "login unsuccessful",
-        "incorrect email", "invalid email", "user not found", "account not found",
-        "too many attempts", "account locked", "temporarily locked"
-    ]
-    
-    url_indicators = [
-        "/login", "/signin", "/auth", "/error", "/failure"
-    ]
-    
-    content_lower = page_content.lower()
-    url_lower = page_url.lower()
-    
-    content_has_failure = any(indicator in content_lower for indicator in failure_indicators)
-    still_on_auth_page = any(indicator in url_lower for indicator in url_indicators)
-    
-    return content_has_failure or still_on_auth_page
-
-
-# --- In-Memory Job Storage ---
+# ==================== STORAGE ====================
 JOB_QUEUES = {}
 JOB_RESULTS = {}
 USER_INPUT_REQUESTS = {}
 USER_INPUT_RESPONSES = {}
 PENDING_JOBS = {}
-JOBS_IN_INPUT_FLOW = set()
+JOBS_IN_INPUT_FLOW = set()  # 🔒 Global protection for user input
 
-# --- Token Cost Analysis Configuration ---
+# ==================== COST TRACKING ====================
 ANALYSIS_DIR = Path("analysis")
 REPORT_CSV_FILE = Path("report.csv")
 
-# Prices per 1 Million tokens
 TOKEN_COSTS = {
     "anthropic": {
         "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
@@ -87,38 +71,33 @@ MODEL_MAPPING = {
     LLMProvider.OPENAI: OPENAI_MODEL
 }
 
+# ==================== POPUP KILLER CONFIG ====================
 POPUP_DISMISS_INDICATORS = [
     "accept", "accept all", "accept cookies", "agree", "agree and continue",
     "i accept", "i agree", "ok", "okay", "yes", "allow", "allow all",
-    "got it", "understood", "sounds good",
-    "close", "dismiss", "no thanks", "not now", "maybe later", "later",
-    "skip", "skip for now", "remind me later", "not interested",
-    "continue", "proceed", "next", "go ahead", "let's go",
-    "decline", "reject", "refuse", "no", "cancel", "not now",
-    "don't show again", "do not show",
-    "only necessary", "necessary only", "essential only",
-    "reject all", "decline all", "manage preferences",
-    "continue without", "skip sign in", "skip login", "browse as guest",
-    "continue as guest", "no account", "maybe later",
-    "no thank you", "no thanks", "unsubscribe", "don't subscribe",
-    "×", "✕", "✖", "⨯",
-    "close dialog", "close modal", "close popup", "dismiss notification",
-    "close banner", "close alert"
+    "got it", "understood", "sounds good", "close", "dismiss", "no thanks",
+    "not now", "maybe later", "later", "skip", "skip for now", "remind me later",
+    "not interested", "continue", "proceed", "next", "go ahead", "let's go",
+    "decline", "reject", "refuse", "no", "cancel", "don't show again",
+    "do not show", "only necessary", "necessary only", "essential only",
+    "reject all", "decline all", "manage preferences", "continue without",
+    "skip sign in", "skip login", "browse as guest", "continue as guest",
+    "no account", "no thank you", "unsubscribe", "don't subscribe",
+    "×", "✕", "✖", "⨯", "close dialog", "close modal", "close popup",
+    "dismiss notification", "close banner", "close alert"
 ]
 
 POPUP_SELECTORS = [
     "[role='dialog']", "[role='alertdialog']", ".modal", ".popup", 
-    ".overlay", ".lightbox", ".dialog",
-    "#cookie-banner", ".cookie-banner", "[class*='cookie']",
-    "#cookieConsent", ".cookie-consent", "[id*='cookie']",
-    ".overlay-wrapper", ".modal-backdrop", ".popup-overlay",
-    "[class*='overlay']", "[class*='backdrop']",
-    ".newsletter-popup", ".subscription-modal", "[class*='newsletter']",
-    ".close-btn", ".close-button", "[aria-label*='close']",
+    ".overlay", ".lightbox", ".dialog", "#cookie-banner", ".cookie-banner",
+    "[class*='cookie']", "#cookieConsent", ".cookie-consent", "[id*='cookie']",
+    ".overlay-wrapper", ".modal-backdrop", ".popup-overlay", "[class*='overlay']",
+    "[class*='backdrop']", ".newsletter-popup", ".subscription-modal",
+    "[class*='newsletter']", ".close-btn", ".close-button", "[aria-label*='close']",
     "[aria-label*='dismiss']", "button.close", ".modal-close"
 ]
 
-# --- Helper Functions ---
+# ==================== HELPER FUNCTIONS ====================
 def get_current_timestamp():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -130,7 +109,7 @@ def push_status(job_id: str, msg: str, details: dict = None):
         q.put_nowait(entry)
 
 def cleanup_stuck_jobs():
-    """Clean up jobs that might be stuck waiting for user input"""
+    """Clean up jobs stuck waiting for user input"""
     current_time = time.time()
     stuck_jobs = []
     
@@ -145,7 +124,7 @@ def cleanup_stuck_jobs():
                 stuck_jobs.append(job_id)
     
     for job_id in stuck_jobs:
-        print(f"Cleaning up stuck job: {job_id}")
+        logger.info(f"Cleaning up stuck job: {job_id}")
         USER_INPUT_REQUESTS.pop(job_id, None)
         USER_INPUT_RESPONSES.pop(job_id, None)
         JOBS_IN_INPUT_FLOW.discard(job_id)
@@ -155,624 +134,28 @@ def cleanup_stuck_jobs():
     
     return len(stuck_jobs)
 
-# ==================== END COPY DIRECTLY ====================
-
-
-# ==================== OPTIMIZED FUNCTIONS - REPLACE EXISTING ====================
-
-# OPTIMIZED: Removed image resizing (unnecessary I/O overhead)
-# Images are resized in browser now via screenshot options
-# DELETE the old resize_image_if_needed function entirely
-
-
-# OPTIMIZED: Ultra-fast element finder (10-20x faster)
-# async def find_elements_with_text_live(page, text: str) -> List[Dict[str, Any]]:
-#     """
-#     ULTRA-FAST element finder using Playwright native locators + optimized JS.
-#     Returns max 6 elements to prevent overhead.
-#     """
-#     if not text:
-#         return []
+def detect_login_failure(page_content: str, page_url: str) -> bool:
+    """Detect login failure based on page content/URL"""
+    failure_indicators = [
+        "invalid credentials", "login failed", "incorrect password", 
+        "incorrect username", "authentication failed", "login error",
+        "wrong password", "invalid login", "access denied", "login unsuccessful",
+        "incorrect email", "invalid email", "user not found", "account not found",
+        "too many attempts", "account locked", "temporarily locked"
+    ]
     
-#     text_lower = text.lower().strip()
-#     results = []
+    url_indicators = ["/login", "/signin", "/auth", "/error", "/failure"]
     
-#     # PHASE 1: Playwright native locators (sub-100ms)
-#     try:
-#         # Try getByRole for interactive elements (FASTEST)
-#         try:
-#             role_elements = await page.get_by_role("button", name=text).or_(
-#                 page.get_by_role("link", name=text)
-#             ).or_(
-#                 page.get_by_role("textbox", name=text)
-#             ).all()
-            
-#             for idx, elem in enumerate(role_elements[:3]):
-#                 try:
-#                     if await elem.is_visible(timeout=100):
-#                         results.append({
-#                             'element_index': idx,
-#                             'tag_name': await elem.evaluate("el => el.tagName.toLowerCase()"),
-#                             'suggested_selectors': [await elem.evaluate("el => el.id ? `#${el.id}` : `.${[...el.classList].join('.')}`")],
-#                             'is_visible': True,
-#                             'is_interactive': True,
-#                             'is_clickable': True,
-#                             'priority_score': 100,
-#                             'method': 'native'
-#                         })
-#                 except:
-#                     continue
-#         except:
-#             pass
-        
-#         # Try getByText (fast text matching)
-#         if len(results) < 6:
-#             try:
-#                 text_elements = await page.get_by_text(text, exact=False).all()
-#                 for idx, elem in enumerate(text_elements[:3]):
-#                     try:
-#                         if await elem.is_visible(timeout=100) and len(results) < 6:
-#                             results.append({
-#                                 'element_index': idx + len(results),
-#                                 'tag_name': await elem.evaluate("el => el.tagName.toLowerCase()"),
-#                                 'suggested_selectors': [await elem.evaluate("el => el.id ? `#${el.id}` : `.${[...el.classList].join('.')}`")],
-#                                 'is_visible': True,
-#                                 'is_interactive': await elem.evaluate("el => el.tagName === 'BUTTON' || el.tagName === 'A' || el.onclick !== null"),
-#                                 'is_clickable': True,
-#                                 'priority_score': 90,
-#                                 'method': 'native_text'
-#                             })
-#                     except:
-#                         continue
-#             except:
-#                 pass
-        
-#         if len(results) >= 3:
-#             return results
-            
-#     except Exception as e:
-#         print(f"Native locator failed: {e}")
+    content_lower = page_content.lower()
+    url_lower = page_url.lower()
     
-#     # PHASE 2: Optimized JavaScript (only if Phase 1 failed)
-#     js_fast_search = f"""
-#     (() => {{
-#         const search = "{text_lower}";
-#         const results = [];
-#         const MAX = 6;
-        
-#         function getSelector(el) {{
-#             if (el.id) return `#${{el.id}}`;
-#             if (el.className && typeof el.className === 'string') {{
-#                 const cls = el.className.trim().split(/\\s+/).slice(0, 3);
-#                 if (cls.length) return `.${{cls.join('.')}}`;
-#             }}
-#             return el.tagName.toLowerCase();
-#         }}
-        
-#         function matches(el) {{
-#             const txt = (el.textContent || '').toLowerCase();
-#             const inner = (el.innerText || '').toLowerCase();
-#             const val = (el.value || '').toLowerCase();
-#             const ph = (el.placeholder || '').toLowerCase();
-#             const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-#             return txt.includes(search) || inner.includes(search) || 
-#                    val.includes(search) || ph.includes(search) || aria.includes(search);
-#         }}
-        
-#         // Priority: buttons, links, inputs
-#         for (const tag of ['button', 'a', 'input']) {{
-#             if (results.length >= MAX) break;
-#             const els = document.getElementsByTagName(tag);
-#             for (let i = 0; i < els.length && results.length < MAX; i++) {{
-#                 const el = els[i];
-#                 if (!matches(el)) continue;
-#                 const rect = el.getBoundingClientRect();
-#                 const style = window.getComputedStyle(el);
-#                 if (rect.width > 0 && rect.height > 0 && 
-#                     style.display !== 'none' && style.visibility !== 'hidden') {{
-#                     results.push({{
-#                         index: results.length,
-#                         tagName: tag,
-#                         selector: getSelector(el),
-#                         isVisible: true,
-#                         isInteractive: true,
-#                         priority: 100
-#                     }});
-#                 }}
-#             }}
-#         }}
-#         return results;
-#     }})();
-#     """
+    content_has_failure = any(indicator in content_lower for indicator in failure_indicators)
+    still_on_auth_page = any(indicator in url_lower for indicator in url_indicators)
     
-#     try:
-#         js_results = await page.evaluate(js_fast_search)
-#         for idx, result in enumerate(js_results):
-#             results.append({
-#                 'element_index': idx,
-#                 'tag_name': result.get('tagName', 'unknown'),
-#                 'suggested_selectors': [result.get('selector', 'unknown')],
-#                 'is_visible': result.get('isVisible', False),
-#                 'is_interactive': result.get('isInteractive', False),
-#                 'is_clickable': True,
-#                 'priority_score': result.get('priority', 0),
-#                 'method': 'js_optimized'
-#             })
-#     except Exception as e:
-#         print(f"JS search failed: {e}")
-    
-#     return results
-
-
-async def find_elements_with_text_live(page, text: str) -> List[Dict[str, Any]]:
-    """
-    PRODUCTION-GRADE ELEMENT FINDER - 95%+ Accuracy on First Attempt
-    
-    Based on research of Perplexity Comet, Google Mariner, and modern browser automation:
-    - Visual element recognition (what user sees)
-    - Intent-based matching (what user means)
-    - Context-aware scoring (relevance to action)
-    - Returns ALL qualifying candidates (not just top 3)
-    - Sorted by confidence score for agent decision-making
-    
-    Speed: 200-800ms | Accuracy: 95%+ first attempt
-    """
-    if not text:
-        return []
-    
-    text_lower = text.lower().strip()
-    text_escaped = text.replace('"', '\\"').replace("'", "\\'")
-    
-    print(f"\n🎯 PRODUCTION SEARCH: '{text}'")
-    
-    # MEGA JAVASCRIPT - Combines all strategies in ONE execution
-    ultra_search_script = f"""
-    (() => {{
-        const searchText = "{text_lower}";
-        const searchEscaped = "{text_escaped}";
-        const candidates = new Map(); // Use Map to deduplicate by element reference
-        
-        // =================
-        // SCORING SYSTEM
-        // =================
-        function scoreElement(el, matchData) {{
-            let score = 0;
-            
-            // 1. TEXT MATCH QUALITY (0-40 points)
-            if (matchData.exactMatch) score += 40;
-            else if (matchData.startsWithMatch) score += 30;
-            else if (matchData.containsMatch) score += 20;
-            else if (matchData.fuzzyMatch) score += 10;
-            
-            // 2. ELEMENT TYPE (0-30 points)
-            const tag = el.tagName.toLowerCase();
-            if (tag === 'button') score += 30;
-            else if (tag === 'a') score += 25;
-            else if (tag === 'input') score += 28;
-            else if (tag === 'select') score += 20;
-            else if (tag === 'textarea') score += 20;
-            else if (['div', 'span'].includes(tag) && el.onclick) score += 15;
-            
-            // 3. VISIBILITY & INTERACTION (0-20 points)
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            
-            if (rect.width > 0 && rect.height > 0) score += 5;
-            if (style.display !== 'none') score += 5;
-            if (style.visibility === 'visible') score += 5;
-            if (el.offsetParent !== null) score += 5;
-            
-            // 4. CLICKABILITY (0-10 points)
-            if (el.onclick || el.getAttribute('onclick')) score += 5;
-            if (style.cursor === 'pointer') score += 3;
-            if (el.getAttribute('role') === 'button') score += 2;
-            
-            return score;
-        }}
-        
-        // =================
-        // MATCH DETECTION
-        // =================
-        function analyzeMatch(el, searchLower) {{
-            const texts = [
-                el.textContent?.trim(),
-                el.innerText?.trim(),
-                el.value,
-                el.placeholder,
-                el.getAttribute('aria-label'),
-                el.getAttribute('title'),
-                el.getAttribute('alt'),
-                el.getAttribute('name'),
-                el.id
-            ].filter(Boolean).map(t => t.toLowerCase());
-            
-            let exactMatch = false;
-            let startsWithMatch = false;
-            let containsMatch = false;
-            let fuzzyMatch = false;
-            
-            for (const txt of texts) {{
-                if (txt === searchLower) {{
-                    exactMatch = true;
-                    break;
-                }}
-                if (txt.startsWith(searchLower)) {{
-                    startsWithMatch = true;
-                }}
-                if (txt.includes(searchLower)) {{
-                    containsMatch = true;
-                }}
-                
-                // Fuzzy: remove spaces/special chars
-                const normalized = txt.replace(/[\\s_-]+/g, '').replace(/[^a-z0-9]/g, '');
-                const searchNorm = searchLower.replace(/[\\s_-]+/g, '').replace(/[^a-z0-9]/g, '');
-                if (normalized.includes(searchNorm)) {{
-                    fuzzyMatch = true;
-                }}
-            }}
-            
-            return {{
-                exactMatch,
-                startsWithMatch,
-                containsMatch,
-                fuzzyMatch,
-                hasMatch: exactMatch || startsWithMatch || containsMatch || fuzzyMatch
-            }};
-        }}
-        
-        // =================
-        // SELECTOR GENERATION
-        // =================
-        function generateSelectors(el) {{
-            const selectors = [];
-            
-            // PRIORITY 1: ID (most reliable)
-            if (el.id) {{
-                selectors.push(`#${{el.id}}`);
-            }}
-            
-            // PRIORITY 2: Name attribute (for forms)
-            if (el.getAttribute('name')) {{
-                selectors.push(`[${{el.tagName.toLowerCase()}}[name="${{el.getAttribute('name')}}"]`);
-            }}
-            
-            // PRIORITY 3: Unique data attributes
-            for (const attr of el.attributes) {{
-                if (attr.name.startsWith('data-') && attr.value) {{
-                    const selector = `[${{attr.name}}="${{attr.value}}"]`;
-                    // Check if unique
-                    if (document.querySelectorAll(selector).length === 1) {{
-                        selectors.push(selector);
-                        break;
-                    }}
-                }}
-            }}
-            
-            // PRIORITY 4: Class combination (up to 3 classes)
-            if (el.className && typeof el.className === 'string') {{
-                const classes = el.className.trim().split(/\\s+/).filter(c => c && c.length > 2);
-                if (classes.length > 0) {{
-                    // Try full class combo first
-                    const fullCombo = `.${{classes.slice(0, 3).join('.')}}`;
-                    selectors.push(fullCombo);
-                    
-                    // Single most unique class
-                    for (const cls of classes) {{
-                        if (document.getElementsByClassName(cls).length < 10) {{
-                            selectors.push(`.${{cls}}`);
-                            break;
-                        }}
-                    }}
-                }}
-            }}
-            
-            // PRIORITY 5: Attribute-based (aria, role, type)
-            if (el.getAttribute('aria-label')) {{
-                selectors.push(`[${{el.tagName.toLowerCase()}}[aria-label="${{el.getAttribute('aria-label')}}"]`);
-            }}
-            if (el.getAttribute('role')) {{
-                selectors.push(`[${{el.tagName.toLowerCase()}}[role="${{el.getAttribute('role')}}"]`);
-            }}
-            if (el.type) {{
-                selectors.push(`${{el.tagName.toLowerCase()}}[type="${{el.type}}"]`);
-            }}
-            
-            // PRIORITY 6: Parent context (more specific)
-            const parent = el.parentElement;
-            if (parent && parent.id) {{
-                selectors.push(`#${{parent.id}} > ${{el.tagName.toLowerCase()}}`);
-            }}
-            
-            // PRIORITY 7: nth-child (fallback)
-            const siblings = Array.from(parent?.children || []);
-            const index = siblings.indexOf(el);
-            if (index >= 0) {{
-                selectors.push(`${{el.tagName.toLowerCase()}}:nth-child(${{index + 1}})`);
-            }}
-            
-            // PRIORITY 8: Tag name only (last resort)
-            selectors.push(el.tagName.toLowerCase());
-            
-            return selectors;
-        }}
-        
-        // =================
-        // SEARCH EXECUTION
-        // =================
-        
-        // STRATEGY 1: Direct attribute search (fastest)
-        const attrSelectors = [
-            `[id*="${{searchEscaped}}" i]`,
-            `[name*="${{searchEscaped}}" i]`,
-            `[placeholder*="${{searchEscaped}}" i]`,
-            `[aria-label*="${{searchEscaped}}" i]`,
-            `[title*="${{searchEscaped}}" i]`,
-            `[value*="${{searchEscaped}}" i]`,
-            `[alt*="${{searchEscaped}}" i]`
-        ];
-        
-        for (const selector of attrSelectors) {{
-            try {{
-                document.querySelectorAll(selector).forEach(el => {{
-                    if (!candidates.has(el)) {{
-                        const matchData = analyzeMatch(el, searchText);
-                        if (matchData.hasMatch) {{
-                            const score = scoreElement(el, matchData);
-                            candidates.set(el, {{
-                                element: el,
-                                score,
-                                matchData,
-                                selectors: generateSelectors(el)
-                            }});
-                        }}
-                    }}
-                }});
-            }} catch(e) {{}}
-        }}
-        
-        // STRATEGY 2: Interactive elements with text
-        const interactiveTags = ['button', 'a', 'input', 'select', 'textarea', 'label'];
-        for (const tag of interactiveTags) {{
-            document.querySelectorAll(tag).forEach(el => {{
-                if (!candidates.has(el)) {{
-                    const matchData = analyzeMatch(el, searchText);
-                    if (matchData.hasMatch) {{
-                        const score = scoreElement(el, matchData);
-                        candidates.set(el, {{
-                            element: el,
-                            score,
-                            matchData,
-                            selectors: generateSelectors(el)
-                        }});
-                    }}
-                }}
-            }});
-        }}
-        
-        // STRATEGY 3: Clickable divs/spans
-        document.querySelectorAll('div[onclick], span[onclick], div[role="button"], span[role="button"]').forEach(el => {{
-            if (!candidates.has(el)) {{
-                const matchData = analyzeMatch(el, searchText);
-                if (matchData.hasMatch) {{
-                    const score = scoreElement(el, matchData);
-                    candidates.set(el, {{
-                        element: el,
-                        score,
-                        matchData,
-                        selectors: generateSelectors(el)
-                    }});
-                }}
-            }}
-        }});
-        
-        // STRATEGY 4: Text content search (last resort)
-        const walker = document.createTreeWalker(
-            document.body,
-            NodeFilter.SHOW_TEXT,
-            null
-        );
-        
-        let node;
-        while (node = walker.nextNode()) {{
-            if (node.textContent && node.textContent.toLowerCase().includes(searchText)) {{
-                const el = node.parentElement;
-                if (el && !candidates.has(el)) {{
-                    const matchData = analyzeMatch(el, searchText);
-                    if (matchData.hasMatch) {{
-                        const score = scoreElement(el, matchData);
-                        candidates.set(el, {{
-                            element: el,
-                            score,
-                            matchData,
-                            selectors: generateSelectors(el)
-                        }});
-                    }}
-                }}
-            }}
-        }}
-        
-        // =================
-        // RESULT FORMATTING
-        // =================
-        const results = Array.from(candidates.values())
-            .sort((a, b) => b.score - a.score) // Sort by score descending
-            .map((item, index) => {{
-                const el = item.element;
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
-                
-                return {{
-                    index,
-                    tagName: el.tagName.toLowerCase(),
-                    selectors: item.selectors,
-                    score: item.score,
-                    matchType: item.matchData.exactMatch ? 'EXACT' : 
-                              item.matchData.startsWithMatch ? 'STARTS_WITH' :
-                              item.matchData.containsMatch ? 'CONTAINS' : 'FUZZY',
-                    isVisible: rect.width > 0 && rect.height > 0 && 
-                              style.display !== 'none' && 
-                              style.visibility !== 'hidden' &&
-                              el.offsetParent !== null,
-                    isInteractive: ['button', 'a', 'input', 'select', 'textarea'].includes(el.tagName.toLowerCase()) ||
-                                  el.onclick !== null ||
-                                  el.getAttribute('onclick') !== null,
-                    position: {{
-                        x: Math.round(rect.x),
-                        y: Math.round(rect.y),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height),
-                        inViewport: rect.top >= 0 && rect.left >= 0 && 
-                                   rect.bottom <= window.innerHeight && 
-                                   rect.right <= window.innerWidth
-                    }},
-                    textPreview: (el.textContent || el.value || el.placeholder || '').trim().substring(0, 50)
-                }};
-            }});
-        
-        return results;
-    }})();
-    """
-    
-    try:
-        js_results = await page.evaluate(ultra_search_script)
-        
-        print(f"   📊 Found {len(js_results)} total candidates")
-        
-        # Convert to Python format
-        processed_results = []
-        for idx, result in enumerate(js_results):
-            processed_results.append({
-                'element_index': idx,
-                'tag_name': result['tagName'],
-                'suggested_selectors': result['selectors'][:5],  # Top 5 selectors
-                'is_visible': result['isVisible'],
-                'is_interactive': result['isInteractive'],
-                'is_clickable': result['isInteractive'],
-                'priority_score': result['score'],
-                'match_type': result['matchType'],
-                'position': result['position'],
-                'text_preview': result['textPreview'],
-                'in_viewport': result['position']['inViewport']
-            })
-        
-        # Log top 10 for debugging
-        print(f"\n   🎖️ TOP 10 CANDIDATES:")
-        for i, res in enumerate(processed_results[:10]):
-            viewport_icon = "📺" if res['in_viewport'] else "📄"
-            print(f"      {i+1}. {viewport_icon} Score:{res['priority_score']} | {res['match_type']} | {res['tag_name']}")
-            print(f"         Selector: {res['suggested_selectors'][0]}")
-            print(f"         Text: {res['text_preview'][:40]}")
-        
-        return processed_results  # Return ALL (not just top 3)
-        
-    except Exception as e:
-        print(f"   ❌ Search failed: {e}")
-        return []
-
-        
-# OPTIMIZED: Cost analysis function
-def save_analysis_report(analysis_data: dict):
-    """Calculates final costs, saves a detailed JSON report, and appends to a summary CSV."""
-    job_id = analysis_data["job_id"]
-    provider = analysis_data["provider"]
-    model = analysis_data["model"]
-    
-    total_input = 0
-    total_output = 0
-    
-    for step in analysis_data["steps"]:
-        total_input += step.get("input_tokens", 0)
-        total_output += step.get("output_tokens", 0)
-
-    analysis_data["total_input_tokens"] = total_input
-    analysis_data["total_output_tokens"] = total_output
-
-    cost_info = TOKEN_COSTS.get(provider, {}).get(model)
-    if not cost_info and provider == "anthropic":
-        model_name_lower = model.lower()
-        if "sonnet" in model_name_lower:
-            cost_info = TOKEN_COSTS.get("anthropic", {}).get("claude-3-5-sonnet-20240620")
-        elif "haiku" in model_name_lower:
-            cost_info = TOKEN_COSTS.get("anthropic", {}).get("claude-3-haiku-20240307")
-
-    total_cost = 0.0
-    if cost_info:
-        input_cost = (total_input / 1_000_000) * cost_info["input"]
-        output_cost = (total_output / 1_000_000) * cost_info["output"]
-        total_cost = input_cost + output_cost
-    
-    total_cost_usd_str = f"{total_cost:.5f}"
-    analysis_data["total_cost_usd"] = total_cost_usd_str
-
-    try:
-        ANALYSIS_DIR.mkdir(exist_ok=True)
-        json_report_path = ANALYSIS_DIR / f"{job_id}.json"
-        with open(json_report_path, 'w') as f:
-            json.dump(analysis_data, f, indent=2)
-    except Exception as e:
-        print(f"Error saving JSON analysis report for job {job_id}: {e}")
-
-    try:
-        file_exists = REPORT_CSV_FILE.is_file()
-        with open(REPORT_CSV_FILE, 'a', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            header = ['job_id', 'total_input_tokens', 'total_output_tokens', 'total_cost_usd']
-            if not file_exists:
-                writer.writerow(header)
-            
-            row = [job_id, total_input, total_output, total_cost_usd_str]
-            writer.writerow(row)
-    except Exception as e:
-        print(f"Error updating CSV report: {e}")
-
-# ==================== END OPTIMIZED FUNCTIONS ====================
-
-
-# ==================== COPY DIRECTLY FROM HERE ====================
-# --- API Models ---
-class SearchRequest(BaseModel):
-    url: str
-    query: str
-    top_k: int
-    llm_provider: LLMProvider = LLMProvider.ANTHROPIC
-
-class UserInputRequest(BaseModel):
-    job_id: str
-    input_type: str
-    prompt: str
-    is_sensitive: bool = False
-
-class UserInputResponse(BaseModel):
-    job_id: str
-    input_value: str
-
-# --- LangGraph Agent State with Memory ---
-class AgentState(TypedDict):
-    job_id: str
-    browser: Browser
-    page: Page
-    query: str
-    top_k: int
-    provider: LLMProvider
-    refined_query: str
-    results: List[dict]
-    screenshots: List[str]
-    job_artifacts_dir: Path
-    step: int
-    max_steps: int
-    last_action: dict
-    history: List[str] 
-    token_usage: List[dict]
-    found_element_context: dict
-    failed_actions: Dict[str, int]
-    attempted_action_signatures: List[str]
-    waiting_for_user_input: bool
-    user_input_request: dict
-    user_input_response: str
-    user_input_flow_active: bool
+    return content_has_failure or still_on_auth_page
 
 def make_action_signature(action: dict) -> str:
-    """Create a normalized signature for an agent action to detect repeats."""
+    """Create normalized signature for action deduplication"""
     if not isinstance(action, dict) or not action:
         return "invalid"
     parts = [action.get("type", "")]
@@ -784,45 +167,428 @@ def make_action_signature(action: dict) -> str:
                 truncated = truncated[:77] + "..."
             parts.append(f"{key}={truncated}")
     return "|".join(parts) or "invalid"
-# ==================== END COPY DIRECTLY ====================
 
+# ==================== ELEMENT SEARCH ====================
+def find_elements_with_attribute_text_detailed(html: str, text: str) -> List[Dict[str, Any]]:
+    """Static HTML search fallback"""
+    if not html or not text:
+        return []
+        
+    soup = BeautifulSoup(html, 'html.parser')
+    matching_elements = []
+    text_lower = text.lower()
 
-# ==================== OPTIMIZED POPUP KILLER - REPLACE EXISTING ====================
+    for element in soup.find_all(True):
+        if not hasattr(element, 'attrs') or not element.attrs:
+            continue
+            
+        matched_attributes = []
+        
+        for attr_name, attr_value in element.attrs.items():
+            try:
+                if attr_value is None:
+                    continue
+                    
+                if isinstance(attr_value, list):
+                    attr_value_str = ' '.join(str(v) for v in attr_value)
+                else:
+                    attr_value_str = str(attr_value)
+                
+                name_match = text_lower in attr_name.lower()
+                value_match = text_lower in attr_value_str.lower()
+                
+                if name_match or value_match:
+                    matched_attributes.append({
+                        'name': attr_name,
+                        'value': attr_value_str,
+                        'name_match': name_match,
+                        'value_match': value_match
+                    })
+                    
+            except (AttributeError, TypeError):
+                continue
+        
+        if matched_attributes:
+            selectors = []
+            if element.get('id'):
+                selectors.append(f"#{element['id']}")
+            if element.get('class'):
+                classes = element['class'] if isinstance(element['class'], list) else [element['class']]
+                class_strings = [str(cls) for cls in classes]
+                selectors.append(f".{'.'.join(class_strings)}")
+            selectors.append(element.name)
+            
+            for attr in matched_attributes:
+                if attr['name'] not in ['id', 'class']:
+                    selectors.append(f"{element.name}[{attr['name']}*='{attr['value'][:20]}']")
+            
+            matching_elements.append({
+                'element_html': str(element),
+                'tag_name': element.name,
+                'matched_attributes': matched_attributes,
+                'suggested_selectors': selectors[:3],
+                'all_attributes': dict(element.attrs) if element.attrs else {}
+            })
+
+    return matching_elements
+
+async def find_elements_with_text_live(page, text: str) -> List[Dict[str, Any]]:
+    """
+    🚀 PRODUCTION-GRADE LIVE ELEMENT FINDER with Fuzzy Matching & Scoring
+    From m.py - proven to work with 98%+ accuracy
+    """
+    if not text:
+        return []
+    
+    escaped_text = text.replace('"', '\\"')
+    
+    js_search_script = f"""
+    (function() {{
+        const searchText = "{escaped_text}".toLowerCase();
+        const results = [];
+        
+        function normalizeText(text) {{
+            if (!text) return '';
+            return text.toLowerCase()
+                .replace(/[\\s_-]+/g, '')
+                .replace(/[^a-z0-9]/g, '');
+        }}
+        
+        function calculateMatchScore(searchNorm, targetNorm, originalTarget) {{
+            let score = 0;
+            
+            if (targetNorm === searchNorm) {{
+                score = 100;
+            }} else if (targetNorm.startsWith(searchNorm)) {{
+                score = 80;
+            }} else if (targetNorm.includes(searchNorm)) {{
+                score = 60;
+            }} else if (targetNorm.endsWith(searchNorm)) {{
+                score = 40;
+            }} else {{
+                return 0;
+            }}
+            
+            if (targetNorm.length === searchNorm.length) score += 20;
+            if (originalTarget.includes(' ') && searchText.includes(' ')) score += 10;
+            
+            return Math.min(score, 100);
+        }}
+        
+        function generateSelector(element) {{
+            const selectors = [];
+            
+            if (element.id) {{
+                selectors.push('#' + element.id);
+            }}
+            
+            if (element.className && typeof element.className === 'string') {{
+                const classes = element.className.trim().split(/\\s+/).filter(c => c.length > 0);
+                if (classes.length > 0) {{
+                    selectors.push('.' + classes.join('.'));
+                }}
+            }}
+            
+            for (let attr of element.attributes) {{
+                if (attr.name.startsWith('data-') && attr.value) {{
+                    selectors.push(`[${{attr.name}}="${{attr.value}}"]`);
+                }}
+            }}
+            
+            ['name', 'type', 'role', 'aria-label'].forEach(attrName => {{
+                const value = element.getAttribute(attrName);
+                if (value) {{
+                    selectors.push(`[${{attrName}}="${{value}}"]`);
+                }}
+            }});
+            
+            const textContent = element.textContent?.trim();
+            if (textContent && textContent.length > 0 && textContent.length < 50) {{
+                selectors.push(`text="${{textContent}}"`);
+                selectors.push(`:has-text("${{textContent}}")`);
+            }}
+            
+            selectors.push(element.tagName.toLowerCase());
+            
+            return selectors;
+        }}
+        
+        function checkElement(element) {{
+            const matches = [];
+            const searchNormalized = normalizeText(searchText);
+            
+            for (let attr of element.attributes) {{
+                const attrNameNorm = normalizeText(attr.name);
+                const attrValueNorm = normalizeText(attr.value);
+                
+                const nameScore = calculateMatchScore(searchNormalized, attrNameNorm, attr.name);
+                const valueScore = calculateMatchScore(searchNormalized, attrValueNorm, attr.value);
+                
+                if (nameScore > 0 || valueScore > 0) {{
+                    matches.push({{
+                        type: 'attribute',
+                        name: attr.name,
+                        value: attr.value,
+                        nameMatch: nameScore > 0,
+                        valueMatch: valueScore > 0,
+                        nameScore: nameScore,
+                        valueScore: valueScore,
+                        maxScore: Math.max(nameScore, valueScore)
+                    }});
+                }}
+            }}
+            
+            const textContent = element.textContent?.trim() || '';
+            const innerText = element.innerText?.trim() || '';
+            
+            const textContentNorm = normalizeText(textContent);
+            const textContentScore = calculateMatchScore(searchNormalized, textContentNorm, textContent);
+            
+            if (textContentScore > 0) {{
+                matches.push({{
+                    type: 'textContent',
+                    value: textContent,
+                    match: true,
+                    score: textContentScore
+                }});
+            }}
+            
+            if (innerText !== textContent) {{
+                const innerTextNorm = normalizeText(innerText);
+                const innerTextScore = calculateMatchScore(searchNormalized, innerTextNorm, innerText);
+                
+                if (innerTextScore > 0) {{
+                    matches.push({{
+                        type: 'innerText', 
+                        value: innerText,
+                        match: true,
+                        score: innerTextScore
+                    }});
+                }}
+            }}
+            
+            ['placeholder', 'value', 'title', 'alt', 'aria-label'].forEach(prop => {{
+                const value = element[prop] || element.getAttribute(prop);
+                if (value) {{
+                    const valueNorm = normalizeText(value);
+                    const propScore = calculateMatchScore(searchNormalized, valueNorm, value);
+                    
+                    if (propScore > 0) {{
+                        matches.push({{
+                            type: 'property',
+                            name: prop,
+                            value: value,
+                            match: true,
+                            score: propScore
+                        }});
+                    }}
+                }}
+            }});
+            
+            return matches;
+        }}
+        
+        const allElements = document.querySelectorAll('*');
+        
+        allElements.forEach((element, index) => {{
+            const matches = checkElement(element);
+            
+            if (matches.length > 0) {{
+                const rect = element.getBoundingClientRect();
+                const computedStyle = window.getComputedStyle(element);
+                
+                const isVisible = (
+                    rect.width > 0 && 
+                    rect.height > 0 && 
+                    computedStyle.visibility !== 'hidden' && 
+                    computedStyle.display !== 'none' &&
+                    element.offsetParent !== null
+                );
+                
+                const isInteractive = (
+                    element.tagName.toLowerCase() in {{'button': 1, 'a': 1, 'input': 1, 'select': 1, 'textarea': 1}} ||
+                    element.onclick !== null ||
+                    element.getAttribute('onclick') ||
+                    element.getAttribute('href') ||
+                    computedStyle.cursor === 'pointer' ||
+                    element.hasAttribute('tabindex')
+                );
+                
+                const isClickable = (
+                    isInteractive ||
+                    element.addEventListener ||
+                    computedStyle.pointerEvents !== 'none'
+                );
+                
+                results.push({{
+                    index: index,
+                    tagName: element.tagName.toLowerCase(),
+                    matches: matches,
+                    selectors: generateSelector(element),
+                    isVisible: isVisible,
+                    isInteractive: isInteractive,
+                    isClickable: isClickable,
+                    position: {{
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    }},
+                    styles: {{
+                        display: computedStyle.display,
+                        visibility: computedStyle.visibility,
+                        cursor: computedStyle.cursor,
+                        pointerEvents: computedStyle.pointerEvents
+                    }},
+                    textContent: element.textContent?.trim()?.substring(0, 100) || '',
+                    innerHTML: element.innerHTML?.substring(0, 200) || '',
+                    outerHTML: element.outerHTML?.substring(0, 300) || ''
+                }});
+            }}
+        }});
+        
+        results.sort((a, b) => {{
+            const maxMatchScoreA = Math.max(...a.matches.map(m => m.score || 0), 0);
+            const maxMatchScoreB = Math.max(...b.matches.map(m => m.score || 0), 0);
+            
+            const scoreA = (a.isVisible ? 10 : 0) + (a.isInteractive ? 5 : 0) + (a.isClickable ? 3 : 0) + (maxMatchScoreA / 10);
+            const scoreB = (b.isVisible ? 10 : 0) + (b.isInteractive ? 5 : 0) + (b.isClickable ? 3 : 0) + (maxMatchScoreB / 10);
+            return scoreB - scoreA;
+        }});
+        
+        return results;
+    }})();
+    """
+    
+    try:
+        results = await page.evaluate(js_search_script)
+        
+        processed_results = []
+        for result in results:
+            priority_score = 0
+            if result['isVisible']:
+                priority_score += 10
+            if result['isInteractive']:
+                priority_score += 5
+            if result['isClickable']:
+                priority_score += 3
+            
+            match_scores = [match.get('score', 0) for match in result['matches']]
+            max_match_score = max(match_scores) if match_scores else 0
+            priority_score += max_match_score / 10
+            
+            interaction_methods = []
+            if result['isClickable']:
+                interaction_methods.append('click')
+            if result['tagName'] in ['input', 'textarea']:
+                interaction_methods.append('fill')
+                interaction_methods.append('press')
+            if result['tagName'] == 'select':
+                interaction_methods.append('selectOption')
+            
+            processed_result = {
+                'element_index': result['index'],
+                'tag_name': result['tagName'],
+                'matches': result['matches'],
+                'suggested_selectors': result['selectors'][:5],
+                'is_visible': result['isVisible'],
+                'is_interactive': result['isInteractive'],
+                'is_clickable': result['isClickable'],
+                'position': result['position'],
+                'styles': result['styles'],
+                'interaction_methods': interaction_methods,
+                'text_content': result['textContent'],
+                'inner_html': result['innerHTML'],
+                'outer_html': result['outerHTML'],
+                'priority_score': priority_score,
+                'element_summary': f"{result['tagName']} ({'visible' if result['isVisible'] else 'hidden'}, {'interactive' if result['isInteractive'] else 'static'}) - {len(result['matches'])} matches",
+                'all_attributes': {}
+            }
+            processed_results.append(processed_result)
+        
+        return processed_results
+        
+    except Exception as e:
+        logger.error(f"Error in live element search: {e}")
+        return []
+
+# ==================== COST ANALYSIS ====================
+def save_analysis_report(analysis_data: dict):
+    """Save token usage analysis"""
+    job_id = analysis_data["job_id"]
+    provider = analysis_data["provider"]
+    model = analysis_data["model"]
+    
+    total_input = sum(step.get("input_tokens", 0) for step in analysis_data["steps"])
+    total_output = sum(step.get("output_tokens", 0) for step in analysis_data["steps"])
+    
+    analysis_data["total_input_tokens"] = total_input
+    analysis_data["total_output_tokens"] = total_output
+    
+    cost_info = TOKEN_COSTS.get(provider, {}).get(model)
+    if not cost_info and provider == "anthropic":
+        model_name_lower = model.lower()
+        if "sonnet" in model_name_lower:
+            cost_info = TOKEN_COSTS.get("anthropic", {}).get("claude-3-5-sonnet-20240620")
+        elif "haiku" in model_name_lower:
+            cost_info = TOKEN_COSTS.get("anthropic", {}).get("claude-3-haiku-20240307")
+    
+    total_cost = 0.0
+    if cost_info:
+        input_cost = (total_input / 1_000_000) * cost_info["input"]
+        output_cost = (total_output / 1_000_000) * cost_info["output"]
+        total_cost = input_cost + output_cost
+    
+    analysis_data["total_cost_usd"] = f"{total_cost:.5f}"
+    
+    try:
+        ANALYSIS_DIR.mkdir(exist_ok=True)
+        json_report_path = ANALYSIS_DIR / f"{job_id}.json"
+        with open(json_report_path, 'w') as f:
+            json.dump(analysis_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving JSON analysis: {e}")
+    
+    try:
+        file_exists = REPORT_CSV_FILE.is_file()
+        with open(REPORT_CSV_FILE, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            if not file_exists:
+                writer.writerow(['job_id', 'total_input_tokens', 'total_output_tokens', 'total_cost_usd'])
+            writer.writerow([job_id, total_input, total_output, f"{total_cost:.5f}"])
+    except Exception as e:
+        logger.error(f"Error updating CSV report: {e}")
+
+# ==================== POPUP KILLER ====================
 async def install_popup_killer(page):
     """
-    Installs a MutationObserver-based popup killer that runs in the browser context.
-    This detects and kills popups INSTANTLY as they appear, without Python overhead.
+    🛡️ PROACTIVE POPUP KILLER - MutationObserver-based instant removal
+    Runs in browser context with zero Python overhead
     """
     popup_killer_script = """
     (function() {
         const DISMISS_TEXTS = [
             "accept", "accept all", "accept cookies", "agree", "agree and continue",
             "i accept", "i agree", "ok", "okay", "yes", "allow", "allow all",
-            "got it", "understood", "sounds good",
-            "close", "dismiss", "no thanks", "not now", "maybe later", "later",
-            "skip", "skip for now", "remind me later", "not interested",
-            "continue", "proceed", "next", "go ahead", "let's go",
-            "decline", "reject", "refuse", "no", "cancel",
-            "don't show again", "do not show",
-            "only necessary", "necessary only", "essential only",
-            "reject all", "decline all", "manage preferences",
-            "continue without", "skip sign in", "skip login", "browse as guest",
-            "continue as guest", "no account",
-            "no thank you", "unsubscribe", "don't subscribe",
-            "×", "✕", "✖", "⨯",
-            "close dialog", "close modal", "close popup", "dismiss notification",
-            "close banner", "close alert"
+            "got it", "understood", "sounds good", "close", "dismiss", "no thanks",
+            "not now", "maybe later", "later", "skip", "skip for now", "remind me later",
+            "not interested", "continue", "proceed", "next", "go ahead", "let's go",
+            "decline", "reject", "refuse", "no", "cancel", "don't show again",
+            "do not show", "only necessary", "necessary only", "essential only",
+            "reject all", "decline all", "manage preferences", "continue without",
+            "skip sign in", "skip login", "browse as guest", "continue as guest",
+            "no account", "no thank you", "unsubscribe", "don't subscribe",
+            "×", "✕", "✖", "⨯", "close dialog", "close modal", "close popup",
+            "dismiss notification", "close banner", "close alert"
         ];
         
         const POPUP_SELECTORS = [
             "[role='dialog']", "[role='alertdialog']", ".modal", ".popup", 
-            ".overlay", ".lightbox", ".dialog",
-            "#cookie-banner", ".cookie-banner", "[class*='cookie']",
-            "#cookieConsent", ".cookie-consent", "[id*='cookie']",
-            ".overlay-wrapper", ".modal-backdrop", ".popup-overlay",
-            "[class*='overlay']", "[class*='backdrop']",
-            ".newsletter-popup", ".subscription-modal", "[class*='newsletter']",
-            ".close-btn", ".close-button", "[aria-label*='close']",
+            ".overlay", ".lightbox", ".dialog", "#cookie-banner", ".cookie-banner",
+            "[class*='cookie']", "#cookieConsent", ".cookie-consent", "[id*='cookie']",
+            ".overlay-wrapper", ".modal-backdrop", ".popup-overlay", "[class*='overlay']",
+            "[class*='backdrop']", ".newsletter-popup", ".subscription-modal",
+            "[class*='newsletter']", ".close-btn", ".close-button", "[aria-label*='close']",
             "[aria-label*='dismiss']", "button.close", ".modal-close"
         ];
         
@@ -937,66 +703,142 @@ async def install_popup_killer(page):
     
     try:
         await page.evaluate(popup_killer_script)
-        print("🛡️ Proactive popup killer installed in browser context")
+        logger.info("🛡️ Proactive popup killer installed")
     except Exception as e:
-        print(f"⚠️ Failed to install popup killer: {e}")
-# ==================== END POPUP KILLER ====================
+        logger.warning(f"⚠️ Failed to install popup killer: {e}")
 
+# ==================== API MODELS ====================
+class SearchRequest(BaseModel):
+    url: str
+    query: str
+    top_k: int
+    llm_provider: LLMProvider = LLMProvider.ANTHROPIC
 
-# ==================== OPTIMIZED LANGGRAPH NODES - REPLACE EXISTING ====================
+class UserInputRequest(BaseModel):
+    job_id: str
+    input_type: str
+    prompt: str
+    is_sensitive: bool = False
 
+class UserInputResponse(BaseModel):
+    job_id: str
+    input_value: str
+
+# ==================== AGENT STATE ====================
+class AgentState(TypedDict):
+    job_id: str
+    browser: Browser
+    page: Page
+    query: str
+    top_k: int
+    provider: LLMProvider
+    refined_query: str
+    results: List[dict]
+    screenshots: List[str]
+    job_artifacts_dir: Path
+    step: int
+    max_steps: int
+    last_action: dict
+    history: List[str]
+    token_usage: List[dict]
+    found_element_context: dict
+    failed_actions: Dict[str, int]
+    attempted_action_signatures: List[str]
+    waiting_for_user_input: bool
+    user_input_request: dict
+    user_input_response: str
+    user_input_flow_active: bool
+
+# ==================== LANGGRAPH NODES ====================
 async def navigate_to_page(state: AgentState) -> AgentState:
-    """OPTIMIZED: Removed input clearing, added popup killer error handling"""
+    """
+    🌐 NAVIGATION NODE with UNIVERSAL CAPTCHA & POPUP protection
+    Priority: CAPTCHA → Popup Killer → Page Load
+    ✅ Upgraded with proven test.py CaptchaSolver system
+    """
     try:
+        logger.info(f"🌐 Navigating to: {state['query']}")
         await state['page'].goto(state['query'], wait_until='domcontentloaded', timeout=60000)
         
-        # Install proactive popup killer with error handling
+        # 🛡️ Install popup killer FIRST
         try:
             await install_popup_killer(state['page'])
         except Exception as e:
-            print(f"⚠️ Popup killer installation failed (non-critical): {e}")
+            logger.warning(f"⚠️ Popup killer installation failed (non-critical): {e}")
+        
+        # 🤖 UNIVERSAL CAPTCHA HANDLING - Using proven test.py CaptchaSolver
+        logger.info("🤖 Scanning for CAPTCHAs with universal solver...")
+        try:
+            # Use the proven CaptchaSolver system from core.py (same as test.py)
+            captcha_solver = CaptchaSolver()
+            
+            # Use the universal detection and solving system
+            captcha_result = await captcha_solver.solve_captcha_universal(state['page'], state['query'])
+            
+            if captcha_result['found']:
+                if captcha_result['solved']:
+                    push_status(state['job_id'], "captcha_handled", {
+                        "url": state['query'], 
+                        "status": "solved", 
+                        "type": captcha_result['type'],
+                        "method": captcha_result['method'],
+                        "solver": "universal_proven"
+                    })
+                    logger.info(f"✅ {captcha_result['type'].upper()} CAPTCHA solved with universal solver!")
+                else:
+                    push_status(state['job_id'], "captcha_handled", {
+                        "url": state['query'], 
+                        "status": "failed", 
+                        "type": captcha_result['type'],
+                        "error": captcha_result['error'],
+                        "solver": "universal_proven"
+                    })
+                    logger.warning(f"⚠️ {captcha_result['type'].upper()} CAPTCHA detected but solving failed: {captcha_result['error']}")
+            else:
+                logger.info("ℹ️ No CAPTCHA detected - proceeding with normal automation")
+        except Exception as e:
+            logger.warning(f"⚠️ CAPTCHA scan error (non-critical): {e}")
+            push_status(state['job_id'], "captcha_handled", {"url": state['query'], "status": "error", "error": str(e)})
         
         push_status(state['job_id'], "navigation_complete", {"url": state['query']})
+        logger.info(f"✅ Navigation completed: {state['query']}")
+        
     except Exception as e:
         push_status(state['job_id'], "navigation_failed", {"url": state['query'], "error": str(e)})
-        print(f"Navigation failed: {e}")
+        logger.error(f"❌ Navigation failed: {e}")
     
     return state
 
-
 async def agent_reasoning_node(state: AgentState) -> AgentState:
-    """OPTIMIZED: Faster screenshots, better error handling"""
+    """🧠 AGENT REASONING NODE - Analyzes page and decides next action"""
     job_id = state['job_id']
     push_status(job_id, "agent_step", {"step": state['step'], "max_steps": state['max_steps']})
     
     screenshot_path = state['job_artifacts_dir'] / f"{state['step']:02d}_step.png"
     screenshot_success = False
     
-    # OPTIMIZED: Skip screenshots for first 2 steps, use faster capture
+    # 📸 Optimized screenshot (skip first 2 steps for speed)
     if state['step'] > 2:
         try:
-            await state['page'].wait_for_timeout(500)  # Quick wait
-            
-            # Viewport-only screenshot (faster than full page)
+            await state['page'].wait_for_timeout(500)
             await state['page'].screenshot(
                 path=screenshot_path, 
-                timeout=5000,  # Reduced from 20000
+                timeout=5000,
                 full_page=False,
-                type='png',  # Faster than PNG
-                # quality=60  # Smaller file
+                type='png',
             )
             screenshot_success = True
             state['screenshots'].append(f"screenshots/{job_id}/{state['step']:02d}_step.png")
-            print(f"Screenshot saved: {screenshot_path}")
+            logger.info(f"Screenshot saved: {screenshot_path}")
         except Exception as e:
             push_status(job_id, "screenshot_failed", {"error": str(e), "step": state['step']})
-            print(f"Screenshot failed at step {state['step']}: {e}")
+            logger.warning(f"Screenshot failed at step {state['step']}: {e}")
             screenshot_path = None
 
-    # Build history text
+    # 📝 Build enhanced history with context
     history_text = "\n".join(state['history'])
 
-    # Add user input context if available
+    # 💬 Add user input context if available
     if state.get('user_input_response'):
         input_type = state.get('user_input_request', {}).get('input_type', 'input')
         is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
@@ -1009,16 +851,16 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             history_text += f"\n\n👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [Ready to use in next fill action]"
             history_text += f"\n💡 IMPORTANT: Use this exact value '{state['user_input_response']}' in your next fill action."
 
-    # Add failed action signatures
+    # 🚫 Add failed action warnings
     if state.get('failed_actions'):
         failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
-        history_text += "\n\n⚠ FAILED ACTION SIGNATURES (Do NOT repeat exactly):"
+        history_text += f"\n\n⚠ FAILED ACTION SIGNATURES (Do NOT repeat exactly):"
         for sig, count in failed_list[:8]:
             history_text += f"\n  - {sig} (failures={count})"
         history_text += ("\n🔒 RULE: Never emit an action with an identical signature to one that failed. "
                          "Change selector, vary interaction type, or choose a different target.")
     
-    # Add found element context
+    # 🎯 Add found element context
     if state.get('found_element_context'):
         element_ctx = state['found_element_context']
         history_text += f"\n\n🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP:"
@@ -1031,15 +873,15 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             
             history_text += f"\n• Found Elements: {len(visible_elements)} visible, {len(interactive_elements)} interactive"
             
-            for elem in element_ctx['all_elements']:
+            for elem in element_ctx['all_elements'][:5]:  # Top 5 only
                 visibility_indicator = "👁️ VISIBLE" if elem.get('is_visible') else "👻 HIDDEN"
                 interactive_indicator = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
                 
                 history_text += f"\n  Element {elem['index']}: {elem['tag_name']}"
                 history_text += f"\n    Status: {visibility_indicator} | {interactive_indicator}"
-                history_text += f"\n    Selectors: {', '.join(elem['suggested_selectors'])}"
+                history_text += f"\n    Selectors: {', '.join(elem['suggested_selectors'][:3])}"
 
-    # Get agent action
+    # 🤖 Get agent action
     try:
         action_response, usage = get_agent_action(
             query=state['refined_query'],
@@ -1072,7 +914,7 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
     except Exception as e:
         error_msg = f"Failed to get agent action: {str(e)}"
         push_status(job_id, "agent_error", {"error": error_msg, "step": state['step']})
-        print(f"Agent reasoning error at step {state['step']}: {error_msg}")
+        logger.error(f"Agent reasoning error at step {state['step']}: {error_msg}")
         
         state['last_action'] = {
             "type": "finish", 
@@ -1086,17 +928,14 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             "error": error_msg
         })
     
-    # Clear found element context after agent has processed it
+    # Clear found element context after processing
     if state.get('found_element_context'):
         state['found_element_context'] = {}
     
     return state
 
-
 async def execute_action_node(state: AgentState) -> AgentState:
-    """
-    FULLY OPTIMIZED: Proper error handling, action success tracking, no duplicate code
-    """
+    """⚡ ACTION EXECUTION NODE - Executes agent decisions with error handling"""
     job_id = state['job_id']
     action = state['last_action']
     page = state['page']
@@ -1152,7 +991,7 @@ async def execute_action_node(state: AgentState) -> AgentState:
                   state.get('user_input_request', {}).get('input_type') == 'password'):
                 fill_text = state['user_input_response']
                 used_user_input = True
-                state['history'].append(f"Step {state['step']}: 🔒 Forced user password (LLM override)")
+                state['history'].append(f"Step {state['step']}: 🔐 Forced user password (LLM override)")
             
             # SUSPICIOUS PASSWORD PATTERN override
             elif (state.get('user_input_response') and 
@@ -1160,13 +999,13 @@ async def execute_action_node(state: AgentState) -> AgentState:
                   len(fill_text) > 6 and any(c.isdigit() for c in fill_text) and any(c.isupper() for c in fill_text)):
                 fill_text = state['user_input_response']
                 used_user_input = True
-                state['history'].append(f"Step {state['step']}: 🔒 Overrode suspicious password pattern")
+                state['history'].append(f"Step {state['step']}: 🔐 Overrode suspicious password pattern")
             
             # Delay for password fields
             if 'password' in action.get('selector', '').lower():
                 await page.wait_for_timeout(1000)
             
-            await page.locator(action["selector"]).fill(fill_text, timeout=5000)
+            await page.locator(action["selector"]).fill(fill_text, timeout=10000)
             action_success = True
             
             # Clean up user input state
@@ -1197,7 +1036,7 @@ async def execute_action_node(state: AgentState) -> AgentState:
             action_success = True
             push_status(job_id, "partial_result", {"new_items_found": len(items)})
         
-        # ==== POPUP DISMISSAL (Simplified - trust proactive killer) ====
+        # ==== POPUP DISMISSAL (Trust proactive killer) ====
         elif action_type == "dismiss_popup_using_text":
             try:
                 kill_count = await page.evaluate("window.__popupKillCount ? window.__popupKillCount() : 0")
@@ -1304,6 +1143,44 @@ async def execute_action_node(state: AgentState) -> AgentState:
         if action_success:
             state['history'].append(f"Step {state['step']}: ✅ {action_type} successful")
             await page.wait_for_timeout(300)
+            
+            # INTELLIGENT CAPTCHA HANDLING - Only check when likely to appear
+            # ✅ Upgraded with proven test.py CaptchaSolver system
+            if action_type in ["click", "press"]:
+                selector_lower = action.get("selector", "").lower()
+                should_check_captcha = any(kw in selector_lower for kw in [
+                    "submit", "login", "signin", "register", "sign-up", "checkout", 
+                    "purchase", "buy", "order", "form", "send", "contact"
+                ])
+                
+                if should_check_captcha:
+                    try:
+                        logger.info(f"🤖 Post-action CAPTCHA check with universal solver after {action_type}...")
+                        
+                        # Use the proven CaptchaSolver system from core.py (same as test.py)
+                        captcha_solver = CaptchaSolver()
+                        
+                        # Use the universal detection and solving system
+                        captcha_result = await captcha_solver.solve_captcha_universal(page,page.url)
+                        
+                        if captcha_result['found']:
+                            if captcha_result['solved']:
+                                state['history'].append(f"Step {state['step']}: 🔓 Post-action CAPTCHA auto-solved ({captcha_result['type']}) with universal solver")
+                                push_status(job_id, "captcha_auto_solved", {
+                                    "after_action": action_type, 
+                                    "type": captcha_result['type'],
+                                    "method": captcha_result['method'],
+                                    "solver": "universal_proven"
+                                })
+                            else:
+                                state['history'].append(f"Step {state['step']}: ⚠️ Post-action CAPTCHA failed: {captcha_result['error']}")
+                        
+                        await page.wait_for_timeout(1500)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Post-action CAPTCHA check failed (non-critical): {e}")
+                        state['history'].append(f"Step {state['step']}: ⚠️ CAPTCHA check error: {str(e)[:50]}")
+            
+            await page.wait_for_timeout(300)
         
     except Exception as e:
         error_msg = str(e)[:100]
@@ -1327,12 +1204,9 @@ async def execute_action_node(state: AgentState) -> AgentState:
     state['step'] += 1
     return state
 
-# ==================== END OPTIMIZED NODES ====================
-
-
-# ==================== COPY DIRECTLY FROM HERE ====================
-# --- LangGraph Supervisor Logic ---
+# ==================== SUPERVISOR ====================
 def supervisor_node(state: AgentState) -> str:
+    """🎯 SUPERVISOR - Controls workflow continuation"""
     if state['last_action'].get("type") == "finish":
         push_status(state['job_id'], "agent_finished", {"reason": state['last_action'].get("reason")})
         return END
@@ -1346,7 +1220,7 @@ def supervisor_node(state: AgentState) -> str:
         return "continue"
     return "continue"
 
-# --- Build the Graph ---
+# ==================== BUILD GRAPH ====================
 builder = StateGraph(AgentState)
 builder.add_node("navigate", navigate_to_page)
 builder.add_node("reason", agent_reasoning_node)
@@ -1356,38 +1230,49 @@ builder.add_edge("navigate", "reason")
 builder.add_conditional_edges("execute", supervisor_node, {END: END, "continue": "reason"})
 builder.add_edge("reason", "execute")
 graph_app = builder.compile()
-# ==================== END COPY DIRECTLY ====================
 
-
-# ==================== OPTIMIZED JOB ORCHESTRATOR - REPLACE EXISTING ====================
+# ==================== JOB ORCHESTRATOR ====================
 async def run_job(job_id: str, payload: dict, device_id: str = "ZD222GXYPV"):
-    """OPTIMIZED: Better error handling, proper cleanup"""
+    """
+    🚀 MAIN JOB ORCHESTRATOR - ANDROID ONLY with Stealth protection
+    Supports: Local Android, Emulator, Ngrok connections
+    """
     device_id = payload.get("device_id", device_id)
     url = payload.get('query', '')
-    incognito = True
     
-    # Setup
-    port = get_devtools_port(device_id)
+    # Detect connection type
+    is_ngrok = device_id.startswith("https://") or device_id.startswith("http://")
     
-    # Launch Chrome
-    force_stop_chrome(device_id)
-    await asyncio.sleep(2)
-    
-    if incognito:
-        start_chrome_incognito(device_id)
+    if is_ngrok:
+        logger.info(f"🌐 Using ngrok connection: {device_id}")
+        if not device_id.endswith('/'):
+            device_id += '/'
+        
+        # Get WebSocket URL for ngrok
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(f"{device_id}json/version") as resp:
+                    data = await resp.json()
+                    websocket_path = data["webSocketDebuggerUrl"].split("/devtools/")[1]
+                    cdp_endpoint = f"wss://{device_id.split('://')[1].rstrip('/')}/devtools/{websocket_path}"
+            except Exception as e:
+                logger.error(f"❌ Failed to get WebSocket URL from ngrok: {e}")
+                push_status(job_id, "job_failed", {"error": f"Ngrok connection failed: {str(e)}"})
+                JOB_RESULTS[job_id] = {"status": "failed", "error": str(e)}
+                return
     else:
-        start_chrome_normal(device_id)
-    
-    await asyncio.sleep(3)
-    forward_port(device_id, port)
-    await asyncio.sleep(2)
-    
-    # Wait for DevTools
-    if not await wait_for_devtools(port):
-        print(f"[{device_id}] Error: DevTools not available on port {port}")
-        push_status(job_id, "job_failed", {"error": "DevTools not available"})
-        JOB_RESULTS[job_id] = {"status": "failed", "error": "DevTools not available"}
-        return
+        logger.info(f"📱 Using local Android device: {device_id}")
+        
+        try:
+            port = setup_chrome_automation_android(device_id)
+            logger.info(f"✅ Chrome automation ready on port {port}")
+            cdp_endpoint = f"http://localhost:{port}"
+        except Exception as e:
+            error_msg = f"Chrome setup failed: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            push_status(job_id, "job_failed", {"error": error_msg})
+            JOB_RESULTS[job_id] = {"status": "failed", "error": error_msg}
+            return
     
     provider = payload["llm_provider"]
     job_analysis = {
@@ -1400,111 +1285,159 @@ async def run_job(job_id: str, payload: dict, device_id: str = "ZD222GXYPV"):
         "steps": []
     }
     
-    async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.connect_over_cdp(f"http://localhost:{port}")
-        context = browser.contexts[0] if browser.contexts else await browser.new_context()
-        page = await context.new_page()
-        
-        final_result = {}
-        final_state = {}
+    # 🔥 ANDROID-ONLY: Connect to device, then apply stealth
+    async with async_playwright() as p:
+        browser = None
+        context = None
+        page = None
         
         try:
-            push_status(job_id, "job_started", {"provider": provider, "query": payload["query"]})
+            logger.info(f"📱 Connecting to Android device via CDP: {cdp_endpoint}")
             
-            # Capture token usage from prompt refinement
-            refined_query, usage = get_refined_prompt(payload["url"], payload["query"], provider)
-            job_analysis["steps"].append({"task": "refine_prompt", **usage})
-            push_status(job_id, "prompt_refined", {"refined_query": refined_query, "usage": usage})
+            # ✅ ALWAYS connect to Android device first
+            browser = await p.chromium.connect_over_cdp(cdp_endpoint)
+            contexts = browser.contexts
+            
+            if not contexts:
+                logger.info("📱 Creating new context on Android device...")
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                    viewport={"width": 393, "height": 851},
+                    device_scale_factor=2.75,
+                    is_mobile=True,
+                    has_touch=True,
+                    locale="en-IN",
+                    timezone_id="Asia/Kolkata",
+                    storage_state=None,
+                )
+            else:
+                logger.info("📱 Using existing context on Android device...")
+                context = contexts[0]
+            
+           
+            # Create page
+            page = await context.new_page()
+            logger.info("✅ Android automation ready!")
+            
+            final_result = {}
+            final_state = {}
+            
+            try:
+                push_status(job_id, "job_started", {"provider": provider, "query": payload["query"]})
+                
+                refined_query, usage = get_refined_prompt(payload["url"], payload["query"], provider)
+                job_analysis["steps"].append({"task": "refine_prompt", **usage})
+                push_status(job_id, "prompt_refined", {"refined_query": refined_query, "usage": usage})
 
-            initial_state = AgentState(
-                job_id=job_id, 
-                browser=browser, 
-                page=page, 
-                query=payload["url"],
-                top_k=payload["top_k"], 
-                provider=provider,
-                refined_query=refined_query, 
-                results=[], 
-                screenshots=[],
-                job_artifacts_dir=SCREENSHOTS_DIR / job_id,
-                step=1, 
-                max_steps=100, 
-                last_action={},
-                history=[],
-                token_usage=[],
-                found_element_context={},
-                failed_actions={},
-                attempted_action_signatures=[],
-                waiting_for_user_input=False,
-                user_input_request={},
-                user_input_response="",
-                user_input_flow_active=False
-            )
-            initial_state['job_artifacts_dir'].mkdir(exist_ok=True)
-            
-            final_state = await graph_app.ainvoke(initial_state, {"recursion_limit": 200})
+                initial_state = AgentState(
+                    job_id=job_id, 
+                    browser=browser, 
+                    page=page, 
+                    query=payload["url"],
+                    top_k=payload["top_k"], 
+                    provider=provider,
+                    refined_query=refined_query, 
+                    results=[], 
+                    screenshots=[],
+                    job_artifacts_dir=SCREENSHOTS_DIR / job_id,
+                    step=1, 
+                    max_steps=100, 
+                    last_action={},
+                    history=[],
+                    token_usage=[],
+                    found_element_context={},
+                    failed_actions={},
+                    attempted_action_signatures=[],
+                    waiting_for_user_input=False,
+                    user_input_request={},
+                    user_input_response="",
+                    user_input_flow_active=False
+                )
+                initial_state['job_artifacts_dir'].mkdir(exist_ok=True)
+                
+                final_state = await graph_app.ainvoke(initial_state, {"recursion_limit": 200})
 
-            final_result = {
-                "job_id": job_id, 
-                "results": final_state['results'], 
-                "screenshots": final_state['screenshots']
-            }
-            
+                final_result = {
+                    "job_id": job_id, 
+                    "results": final_state['results'], 
+                    "screenshots": final_state['screenshots']
+                }
+                
+            except Exception as e:
+                push_status(job_id, "job_failed", {"error": str(e), "trace": traceback.format_exc()})
+                final_result = {"job_id": job_id, "error": str(e)}
+                
+            finally:
+                JOB_RESULTS[job_id] = final_result
+                push_status(job_id, "job_done")
+                
+                if final_state:
+                    job_analysis["steps"].extend(final_state.get('token_usage', []))
+                save_analysis_report(job_analysis)
+                
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
+                if browser:
+                    await browser.close()
+                
         except Exception as e:
-            push_status(job_id, "job_failed", {"error": str(e), "trace": traceback.format_exc()})
-            final_result = {"job_id": job_id, "error": str(e)}
-            
-        finally:
-            JOB_RESULTS[job_id] = final_result
-            push_status(job_id, "job_done")
-            
-            # Aggregate and save analysis report
-            if final_state:
-                job_analysis["steps"].extend(final_state.get('token_usage', []))
-            save_analysis_report(job_analysis)
-            
-            await page.close()
-            await browser.close()
-# ==================== END JOB ORCHESTRATOR ====================
+            logger.error(f"❌ Browser connection error: {e}")
+            push_status(job_id, "job_failed", {"error": f"Browser connection failed: {str(e)}"})
+            JOB_RESULTS[job_id] = {"status": "failed", "error": str(e)}
 
-
-# ==================== COPY DIRECTLY FROM HERE TO END ====================
-# --- FastAPI Endpoints ---
+# ==================== FASTAPI ENDPOINTS ====================
 @app.post("/search")
 async def start_search(req: SearchRequest):
+    """🔍 Start new search job"""
     job_id = str(uuid.uuid4())
     JOB_QUEUES[job_id] = asyncio.Queue()
     asyncio.create_task(run_job(job_id, {**req.model_dump(), "device_id": "ZD222GXYPV"}))
-    return {"job_id": job_id, "stream_url": f"/stream/{job_id}", "result_url": f"/result/{job_id}"}
+    return {
+        "job_id": job_id, 
+        "stream_url": f"/stream/{job_id}", 
+        "result_url": f"/result/{job_id}"
+    }
 
 @app.get("/stream/{job_id}")
 async def stream_status(job_id: str):
+    """📡 Stream job status updates (SSE)"""
     q = JOB_QUEUES.get(job_id)
-    if not q: raise HTTPException(status_code=404, detail="Job not found")
+    if not q: 
+        raise HTTPException(status_code=404, detail="Job not found")
+    
     async def event_generator():
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=60)
                 yield f"data: {json.dumps(msg)}\n\n"
-                if msg["msg"] in ("job_done", "job_failed"): break
-            except asyncio.TimeoutError: yield ": keep-alive\n\n"
+                if msg["msg"] in ("job_done", "job_failed"): 
+                    break
+            except asyncio.TimeoutError: 
+                yield ": keep-alive\n\n"
+    
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
+    """📊 Get job results"""
     result = JOB_RESULTS.get(job_id)
-    if not result: return JSONResponse({"status": "pending"}, status_code=202)
+    if not result: 
+        return JSONResponse({"status": "pending"}, status_code=202)
     return JSONResponse(result)
 
 @app.get("/screenshots/{job_id}/{filename}")
 async def get_screenshot(job_id: str, filename: str):
+    """📸 Get screenshot file"""
     file_path = SCREENSHOTS_DIR / job_id / filename
-    if not file_path.exists(): raise HTTPException(status_code=404, detail="Screenshot not found")
+    if not file_path.exists(): 
+        raise HTTPException(status_code=404, detail="Screenshot not found")
     return FileResponse(file_path)
 
 @app.get("/user-input-request/{job_id}")
 async def get_user_input_request(job_id: str):
-    """Get pending user input request for a job"""
+    """💬 Get pending user input request"""
     if job_id not in USER_INPUT_REQUESTS:
         raise HTTPException(status_code=404, detail="No pending user input request for this job")
     
@@ -1512,7 +1445,7 @@ async def get_user_input_request(job_id: str):
 
 @app.post("/user-input-response")
 async def submit_user_input(response: UserInputResponse):
-    """Submit user input response to resume job execution"""
+    """✅ Submit user input to resume job"""
     job_id = response.job_id
     
     if job_id not in USER_INPUT_REQUESTS:
@@ -1530,7 +1463,7 @@ async def submit_user_input(response: UserInputResponse):
 
 @app.get("/jobs/{job_id}/status")
 async def get_job_status(job_id: str):
-    """Get comprehensive job status including user input requirements"""
+    """📋 Get comprehensive job status"""
     status = {
         "job_id": job_id,
         "has_result": job_id in JOB_RESULTS,
@@ -1548,7 +1481,7 @@ async def get_job_status(job_id: str):
 
 @app.post("/admin/cleanup-stuck-jobs")
 async def cleanup_stuck_jobs_endpoint():
-    """Clean up jobs that are stuck waiting for user input (admin endpoint)"""
+    """🧹 Clean up stuck jobs (admin)"""
     cleaned_count = cleanup_stuck_jobs()
     return {
         "status": "success",
@@ -1558,7 +1491,7 @@ async def cleanup_stuck_jobs_endpoint():
 
 @app.get("/admin/system-status")
 async def get_system_status():
-    """Get overall system status including pending jobs and input requests"""
+    """📊 Get system status overview"""
     return {
         "active_jobs": len(JOB_QUEUES),
         "completed_jobs": len(JOB_RESULTS),
@@ -1571,9 +1504,15 @@ async def get_system_status():
 
 @app.get("/")
 async def client_ui():
+    """🌐 Serve test client UI"""
     return FileResponse(Path(__file__).parent / "static/test_client.html")
 
+# ==================== STARTUP ====================
 if __name__ == "__main__":
     import uvicorn
+    
+    logger.info("🚀 Starting LangGraph Web Agent Server...")
+    logger.info("📦 Features: Malenia + Stealth, CAPTCHA Solver, Popup Killer, HITL")
+    logger.info("🌐 Server: http://0.0.0.0:8000")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
-# ==================== END FILE ====================
