@@ -26,7 +26,7 @@ User's Target URL: {url}
 User's Query: "{query}"
 
 Based on this, generate a single, clear instruction.
-Example: "Find the top 5 smartphones under â‚¹50,000 on flipkart.com, collecting their name, price, and URL."
+Example: "Find the top 5 smartphones under ₹50,000 on flipkart.com, collecting their name, price, and URL."
 Refined Instruction:
 """
 
@@ -40,125 +40,117 @@ You operate in a step-by-step manner. At each step, analyze the current state of
 **Recent Action History (Memory):**
 {history}
 
+**🎯 CRITICAL WORKFLOW - FOLLOW THIS EXACT ORDER:**
 
-**Your Task:**
-1.  **PRIORITY #1: POP-UP CHECK:** Before anything else, examine the screenshot for pop-ups, cookie banners, login modals, or any other interruptions. If you see one, your ONLY goal for this step is to dismiss it using the `dismiss_popup_using_text` tool. Look for buttons with text like "Accept", "Close", "Continue", "Got it", "Maybe later"..
-2.  **Think:** If there are no pop-ups, analyze the situation. Also if there is a popup but that is small and not blocking the process then ignore it and don't try to close it. Only if the popup appears on the main content area and the background is blurred or dark then only consider closing it. Review your history. If your history shows "ðŸŽ¯ COMPREHENSIVE ELEMENT SEARCH RESULTS...", pay close attention to the provided selectors and use them immediately for interaction. If your last action failed, identify why and devise a new strategy. What is your immediate goal?
-3.  **Act:** Choose ONE action from the available tools to move closer to the user's objective.
+**PRIORITY 1: CHECK FOR FOUND ELEMENTS (Skip all other checks if this exists)**
+└─ If your history shows "🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP":
+   ├─ Extract the FIRST selector marked as "visible" and "interactive"
+   ├─ Use it IMMEDIATELY with click/fill/press action
+   ├─ DO NOT search again - selectors are already validated
+   └─ Example: See "✅ Ready-to-use: #login-btn" → Use {{"type": "click", "selector": "#login-btn"}}
+
+**PRIORITY 2: POP-UP CHECK (Only if no found elements from Priority 1)**
+└─ Examine screenshot for blocking pop-ups:
+   ├─ LARGE pop-up with dark/blurred background → Use dismiss_popup_using_text
+   ├─ Small corner banner → IGNORE, proceed with main task
+   └─ No pop-up → Skip to Priority 3
+
+**PRIORITY 3: PLAN YOUR ACTION (Only if no found elements and no blocking pop-ups)**
+└─ Before ANY click/fill/press action:
+   ├─ Step A: Identify EXACT visible text of target element (button/link/input label)
+   ├─ Step B: Use extract_correct_selector_using_text with that EXACT text
+   ├─ Step C: WAIT for next step to receive validated selectors
+   └─ Step D: In next step, use the selector from search results
+
+**CRITICAL RULES:**
+1. 🔄 **Two-Step Interaction Pattern** (MANDATORY):
+   - Step N: Search → {{"type": "extract_correct_selector_using_text", "text": "Button Text"}}
+   - Step N+1: Act → {{"type": "click", "selector": "#found-selector"}}
+   
+2. 🚫 **NEVER Guess Selectors**:
+   - ❌ BAD: {{"type": "click", "selector": "button"}}
+   - ❌ BAD: {{"type": "click", "selector": ".btn-primary"}}
+   - ✅ GOOD: First search, then use found selector
+   
+3. 🎯 **Use Found Elements Immediately**:
+   - If history has search results → Use them, don't search again
+   - If search found multiple → Pick first visible + interactive one
+   
+4. 📝 **Exact Text Matching**:
+   - Use EXACT text from screenshot: "Sign In" not "sign in" or "signin"
+   - Include full button text: "Accept All Cookies" not "Accept"
+   
+5. 🔐 **User Input - EXACT Values**:
+   - History shows "🔐 USER PROVIDED PASSWORD: Abc123!" → Use EXACTLY "Abc123!"
+   - NEVER generate fake passwords like "Password@123" or "test123"
+   - For sensitive data, look for the ACTUAL value in history context
 
 **Available Tools (Action JSON format):**
--   `{{"type": "fill", "selector": "<css_selector>", "text": "<text_to_fill>"}}`: To type in an input field.
--   `{{"type": "click", "selector": "<css_selector>"}}`: To click a button or link.
--   `{{"type": "press", "selector": "<css_selector>", "key": "<key_name>"}}`: To press a key (e.g., "Enter") on an element. **Hint: After filling a search bar, this is often more reliable than clicking a suggestion button.**
--   `{{"type": "scroll", "direction": "down"}}`: To scroll the page and reveal more content.
--   `{{"type": "extract", "items": [{{"title": "...", "price": "...", "url": "...", "snippet": "..."}}]}}`: To extract structured data from the CURRENT VIEW.
--   `{{"type": "finish", "reason": "<summary_of_completion>"}}`: To end the mission when the objective is fully met.
--   `{{"type": "dismiss_popup_using_text", "text": "<text_on_dismiss_button>"}}`: **(HIGH PRIORITY)** Use this first to dismiss any pop-ups or banners by clicking the element with the matching text.
--   `{{"type": "request_user_input", "input_type": "<text|password|otp|email|phone>", "prompt": "<descriptive_prompt_for_user>", "is_sensitive": <true|false>}}`: **Use this when you need user input** like login credentials, OTP codes, phone numbers, etc. The agent will pause and wait for user response.
-
-**Magic Tools (Action JSON format):**
--   `{{"type": "extract_correct_selector_using_text", "text": "Exact text on button, div, span, link, etc."}}`: Use this to find the correct CSS selector for an element by its exact text content. This is useful when you know what you want to click but don't know or unable to find the selector. You should heavily rely on this tool when you think that the element you want to interact with is present on the page but you can't find its selector without using the above available tools.
+-   `{{"type": "extract_correct_selector_using_text", "text": "Exact button/link text"}}`: **USE THIS FIRST** before any interaction
+-   `{{"type": "click", "selector": "<css_selector>"}}`: Click ONLY with validated selector from search
+-   `{{"type": "fill", "selector": "<css_selector>", "text": "<text>"}}`: Fill ONLY with validated selector
+-   `{{"type": "press", "selector": "<css_selector>", "key": "Enter"}}`: Press key after fill
+-   `{{"type": "scroll", "direction": "down"}}`: Scroll to reveal more content
+-   `{{"type": "extract", "items": [{{"title": "...", "price": "...", "url": "..."}}]}}`: Extract structured data
+-   `{{"type": "finish", "reason": "<completion_summary>"}}`: End when objective fully met
+-   `{{"type": "dismiss_popup_using_text", "text": "<dismiss_button_text>"}}`: Dismiss blocking pop-ups
+-   `{{"type": "request_user_input", "input_type": "password", "prompt": "Enter password", "is_sensitive": true}}`: Request user input
 
 **Response Format:**
-You MUST respond with a single, valid JSON object containing "thought" and "action". Do NOT add any other text, explanations, or markdown.
-Example Response for dismissing a pop-up:
+You MUST respond with a single, valid JSON object containing "thought" and "action". Do NOT add any other text.
+
+**Example 1 - Using Found Elements (FASTEST PATH):**
 ```json
 {{
-    "thought": "The first thing I see is a large cookie consent banner blocking the page. I need to click the 'Accept All' button to continue.",
-    "action": {{"type": "dismiss_popup_using_text", "text": "Accept All"}}
-}}
-Example Response for requesting user input:
-```json
-{{
-    "thought": "I found a login form with username and password fields, but the user hasn't provided credentials in their query. I need to request this information from the user.",
-    "action": {{"type": "request_user_input", "input_type": "email", "prompt": "Please provide your email address for login", "is_sensitive": false}}
+    "thought": "History shows element search found '#search-input' from previous step. It's marked as visible and interactive. I'll use it immediately without searching again.",
+    "action": {{"type": "fill", "selector": "#search-input", "text": "smartphones under 50000"}}
 }}
 ```
 
-Example Response for using user input:
+**Example 2 - First Interaction (Search Phase):**
 ```json
 {{
-    "thought": "The user provided their email address: 'user@example.com'. Now I'll fill the username field with their exact input value.",
-    "action": {{"type": "fill", "selector": "#username", "text": "user@example.com"}}
+    "thought": "I can see a 'Login' button in the screenshot at the top-right. I need to click it, but I don't have its selector yet. I must search first using its exact visible text.",
+    "action": {{"type": "extract_correct_selector_using_text", "text": "Login"}}
 }}
 ```
 
-**CRITICAL: When you see user input in your history like:**
-- "ðŸ‘¤ USER PROVIDED EMAIL: user@example.com [Ready to use in next fill action]"
-- "ðŸ” USER PROVIDED PASSWORD: [SENSITIVE DATA PROVIDED - Ready to use in next fill action]"
-
-**ðŸš¨ ABSOLUTELY CRITICAL - USER INPUT USAGE RULE:**
-When you see user-provided input in your history, you MUST extract and use the EXACT VALUE from your history text. 
-
-**DO NOT GENERATE OR MAKE UP VALUES. ONLY USE WHAT THE USER ACTUALLY PROVIDED.**
-
-**For sensitive data like passwords, look for the pattern in your history:**
-- Search for "USER PROVIDED PASSWORD:" in your history
-- If you see user input like "user_input_response: 'Pranavsurya@123'" in context
-- Use that EXACT value "Pranavsurya@123", do NOT generate "Abcd@123456" or any other password
-
-Example of CORRECT usage when user provided password "MySecret123":
+**Example 3 - Second Interaction (Act Phase):**
 ```json
 {{
-    "thought": "I can see in the context that user_input_response is 'MySecret123'. I must use this exact password value, not generate my own.",
-    "action": {{"type": "fill", "selector": "#password", "text": "MySecret123"}}
+    "thought": "Previous search found 2 elements with 'Login' text. First element is '#header-login-btn' (visible: true, interactive: true). Second is '#footer-login' (visible: false). I'll use the visible one.",
+    "action": {{"type": "click", "selector": "#header-login-btn"}}
 }}
 ```
 
-Example of WRONG usage (NEVER DO THIS):
+**Example 4 - Using User Input (CRITICAL):**
 ```json
 {{
-    "thought": "I need to fill a password field",
-    "action": {{"type": "fill", "selector": "#password", "text": "Abcd@123456"}}
+    "thought": "I can see in history: 'USER PROVIDED PASSWORD: MySecret@789'. I must use this EXACT value, not generate a fake password. The password field selector is already found as '#password-input'.",
+    "action": {{"type": "fill", "selector": "#password-input", "text": "MySecret@789"}}
 }}
 ```
 
-**You MUST use the EXACT VALUE provided by the user, NOT any placeholders. For sensitive data, use the actual value even though it's hidden in the display.**
-
-Example of CORRECT usage after user provides email "john@example.com":
+**Example 5 - Login Failure Recovery:**
 ```json
 {{
-    "thought": "I can see the user provided their email: john@example.com. I'll fill the email field with this exact value.",
-    "action": {{"type": "fill", "selector": "#email", "text": "john@example.com"}}
+    "thought": "History shows '🚫 LOGIN FAILURE DETECTED' - the previous credentials were incorrect. I need to request new credentials from the user.",
+    "action": {{"type": "request_user_input", "input_type": "password", "prompt": "Previous login failed. Please provide the correct password.", "is_sensitive": true}}
 }}
 ```
 
-Example of WRONG usage (DO NOT DO THIS):
-```json
-{{
-    "action": {{"type": "fill", "selector": "#email", "text": "{{USER_INPUT}}"}}
-}}
-```
+**🚨 ABSOLUTE RULES:**
+- NEVER click/fill without searching first (unless selector already in history)
+- NEVER search twice for same element
+- ALWAYS use exact text from screenshot in search
+- ALWAYS use first visible+interactive element from search results
+- NEVER generate fake user credentials - use EXACT values from history
+- If selector fails, search with DIFFERENT text (not same text again)
 
-**Current Situation Analysis:**
-Based on the provided HTML, screenshot, and your recent history, what is your next thought and action?
+**Current Situation:**
+{history}
 
-**IMPORTANT NOTES:**
-- Always use the magic tool `extract_correct_selector_using_text` first to find selectors for elements you want to interact with.
-- If your history contains "ðŸŽ¯ IMPORTANT CONTEXT: Element found in previous step!", you MUST use the provided "Ready-to-use Selector" immediately with click, fill, or press action. Do NOT use extract_correct_selector_using_text again for the same element.
-- When you see a suggested selector in your history (e.g., "ðŸ’¡ NEXT ACTION SUGGESTION: Use selector '...'"), follow that suggestion immediately.
-- If the user wants to get any list of items (products, articles, etc.): then use only the search box on the website to search for the required items. Do not try to navigate using menus, categories, filters or click on any buttons etc. Just use the search box to search for the required items.
-- Always try searching in the search box of any websites provided by the user. After searching if you get results then do not try to sort or filter the results. Just extract the required information from the results page or scroll down to load more results and then extract the required information.
-- If you are able to extract the information without requiring any login, do not try to login or signup. But if you are not able to extract the information without login, then you can try to login or signup. The login or signup credentials will be provided by the user in the query. Do not try to login with any third party services like google, facebook, etc. Do not scroll down at this moment. If you are not able to find the required information without scrolling down, then you can try login or signup. After logging in or signing up, you can then scroll down to find the required information.
-- **HUMAN INPUT SCENARIOS:** Use `request_user_input` when you encounter:
-  - Login forms requiring username/password (not provided in query)
-  - OTP/verification codes from SMS or email
-  - Personal information like phone numbers, addresses
-  - **LOGIN FAILURE RECOVERY:** If your history shows "ðŸš« LOGIN FAILURE DETECTED", the previous credentials were incorrect. Request new credentials with a message like "The previous login credentials were incorrect. Please provide the correct username/email and password."
-
-**LOGIN FAILURE HANDLING:**
-- If you see "ðŸš« LOGIN FAILURE DETECTED" in your history, this means the previous login attempt failed
-- You should immediately request NEW credentials from the user using `request_user_input`
-- Use clear prompts like: "The previous login failed. Please provide the correct email address" or "The previous password was incorrect. Please provide the correct password"
-- Do NOT reuse credentials that have already failed - always request fresh ones
-- After getting new credentials, retry the login process from the beginning
-  - CAPTCHA solutions (ask user to solve)
-  - Two-factor authentication codes
-  - Any other information that only the user can provide
-- The most important note is that you have to finish the task at any cost. Do not leave the task unfinished. If you are not able to find the required information, try to find the closest possible information and extract that.
-- Do not try to overfetch or extract unnecessary information. Only extract what is required to fulfill the user's objective. If the required information is already extracted, use the finish action to complete the task.
-- There is no scroll up action. You can only scroll down. So plan your actions accordingly.
-- If any one selector is not working or the element is not found using that selector, then use the magic tool `extract_correct_selector_using_text` to find the correct selector for that element using its exact text content. Do not try to guess or modify the selector by yourself. And do not try to use any other selector from the history if that selector is not working. Always use the magic tool to find the correct selector.
+Based on the HTML, screenshot, and history above, provide your thought and action as a JSON object.
 """
 
 def get_refined_prompt(url: str, query: str, provider: LLMProvider) -> Tuple[str, Dict]:
@@ -167,15 +159,85 @@ def get_refined_prompt(url: str, query: str, provider: LLMProvider) -> Tuple[str
     response_text, usage = get_llm_response("You are a helpful assistant.", prompt, provider, images=[])
     return response_text.strip(), usage
 
+def build_enhanced_history(state) -> str:
+    """
+    🧠 Build smart history that prioritizes found elements and reduces redundancy
+    """
+    history_lines = []
+    
+    # 1. Add found element context at TOP (highest priority)
+    if state.get('found_element_context'):
+        ctx = state['found_element_context']
+        history_lines.append("=" * 60)
+        history_lines.append("🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP")
+        history_lines.append("=" * 60)
+        history_lines.append(f"Search Text: '{ctx['text']}'")
+        history_lines.append(f"Total Matches: {ctx.get('total_matches', 0)}")
+        
+        if ctx.get('all_elements'):
+            visible = [e for e in ctx['all_elements'] if e.get('is_visible')]
+            interactive = [e for e in ctx['all_elements'] if e.get('is_interactive')]
+            
+            history_lines.append(f"Found: {len(visible)} visible, {len(interactive)} interactive elements")
+            history_lines.append("")
+            history_lines.append("📋 TOP MATCHES (Use these selectors):")
+            
+            for i, elem in enumerate(ctx['all_elements'][:3], 1):
+                vis = "✅ VISIBLE" if elem.get('is_visible') else "❌ HIDDEN"
+                inter = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
+                
+                history_lines.append(f"\n  [{i}] {elem['tag_name']} - {vis}, {inter}")
+                
+                if elem['suggested_selectors']:
+                    best_selector = elem['suggested_selectors'][0]
+                    history_lines.append(f"      ✅ Ready-to-use: {best_selector}")
+                    history_lines.append(f"      Alternatives: {', '.join(elem['suggested_selectors'][1:3])}")
+        
+        history_lines.append("=" * 60)
+        history_lines.append("")
+    
+    # 2. Add user input context (if available)
+    if state.get('user_input_response'):
+        input_type = state.get('user_input_request', {}).get('input_type', 'input')
+        is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
+        
+        if is_sensitive:
+            # Show actual value for sensitive data so agent uses it
+            history_lines.append("🔐 USER PROVIDED SENSITIVE DATA:")
+            history_lines.append(f"   Type: {input_type.upper()}")
+            history_lines.append(f"   Value: {state['user_input_response']}")
+            history_lines.append(f"   ⚠️ USE THIS EXACT VALUE - DO NOT GENERATE FAKE DATA")
+        else:
+            history_lines.append(f"👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']}")
+        
+        history_lines.append("")
+    
+    # 3. Add recent action history (last 10 only)
+    if state.get('history'):
+        history_lines.append("📜 RECENT ACTIONS:")
+        recent = state['history'][-10:]
+        for line in recent:
+            history_lines.append(f"  {line}")
+        history_lines.append("")
+    
+    # 4. Add failure warnings
+    if state.get('failed_actions'):
+        history_lines.append("⚠️ FAILED ACTIONS (DO NOT REPEAT):")
+        failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
+        for sig, count in failed_list[:5]:
+            history_lines.append(f"  ❌ {sig} (failed {count}x)")
+        history_lines.append("")
+    
+    return "\n".join(history_lines)
+
 def get_agent_action(query: str, url: str, html: str, provider: LLMProvider, screenshot_path: Union[Path, None], history: str) -> Tuple[dict, Dict]:
     """Gets the next thought and action from the agent, and returns token usage."""
-    # Add note about screenshot availability
     screenshot_note = ""
     if not screenshot_path:
-        screenshot_note = "\n\n**âš ï¸ NOTE: Screenshot capture failed - relying on HTML content only for analysis.**"
+        screenshot_note = "\n\n**⚠️ NOTE: Screenshot capture failed - relying on HTML content only.**"
     
     prompt = AGENT_PROMPT.format(query=query, url=url, history=history or "No actions taken yet.") + screenshot_note
-    system_prompt = "You are an autonomous web agent. Respond ONLY with the JSON object containing your thought and action."
+    system_prompt = "You are an autonomous web agent. Respond ONLY with a JSON object containing 'thought' and 'action'. No other text."
 
     try:
         images = [screenshot_path] if screenshot_path else []
@@ -186,23 +248,20 @@ def get_agent_action(query: str, url: str, html: str, provider: LLMProvider, scr
         
         action = extract_json_from_response(response_text)
         
-        # Validate the action structure
         if not isinstance(action, dict):
             raise ValueError("Response is not a dictionary")
         
         if "action" not in action:
-            # If no action field, try to construct one from the response
-            action["action"] = {"type": "finish", "reason": "No action specified in response"}
+            action["action"] = {"type": "finish", "reason": "No action specified"}
         
         return action, usage
         
     except Exception as e:
         print(f"Error in get_agent_action: {e}")
         error_action = {
-            "thought": f"Error: Could not parse a valid JSON action from the model's response. {str(e)}", 
+            "thought": f"Error parsing model response: {str(e)}", 
             "action": {"type": "finish", "reason": f"Parsing failed: {str(e)}"}
         }
-        # Return actual usage if available, otherwise zeros
         error_usage = {"input_tokens": usage.get("input_tokens", 0) if 'usage' in locals() else 0, "output_tokens": 0} 
         return error_action, error_usage
 
@@ -220,9 +279,6 @@ def get_llm_response(
         if not anthropic_client: raise ValueError("Anthropic client not initialized.")
         
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        # for img_path in images:
-        #     with open(img_path, "rb") as f: img_data = base64.b64encode(f.read()).decode("utf-8")
-        #     messages[0]["content"].append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}})
 
         if images:
             last_image_path = images[-1]
@@ -230,17 +286,14 @@ def get_llm_response(
                 try:
                     with open(last_image_path, "rb") as f: 
                         img_data = base64.b64encode(f.read()).decode("utf-8")
-                        # Only add image if we have actual data
                         if img_data:
                             messages[0]["content"].append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}})
                 except Exception as e:
                     print(f"Warning: Failed to read screenshot {last_image_path}: {e}")
-                    # Continue without image
 
         response = anthropic_client.messages.create(model=ANTHROPIC_MODEL, max_tokens=2048, system=system_prompt, messages=messages)
         usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
         
-        # Handle potential None response content
         if not response.content or len(response.content) == 0:
             return "", usage
         
@@ -263,13 +316,11 @@ def get_llm_response(
                             messages[0]["content"].append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}})
                 except Exception as e:
                     print(f"Warning: Failed to read screenshot {img_path}: {e}")
-                    # Continue without image
         
         response = openai_client.chat.completions.create(model=OPENAI_MODEL, max_tokens=2048, messages=[{"role": "system", "content": system_prompt}, *messages])
         if response.usage:
             usage = {"input_tokens": response.usage.prompt_tokens, "output_tokens": response.usage.completion_tokens}
         
-        # Handle potential None response content
         content = response.choices[0].message.content
         return content or "", usage
 
@@ -281,7 +332,6 @@ def get_llm_response(
         if response.usage:
              usage = {"input_tokens": response.usage.prompt_tokens, "output_tokens": response.usage.completion_tokens}
         
-        # Handle potential None response content
         content = response.choices[0].message.content
         return content or "", usage
 
@@ -294,14 +344,16 @@ def extract_json_from_response(text: str) -> Union[dict, list]:
     if not text or not text.strip():
         raise ValueError("Empty response from LLM")
     
-    # Clean the text first
     text = text.strip()
     
-    # Try multiple regex patterns to find JSON
+    # Remove markdown code blocks
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
+    
     patterns = [
-        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # More specific nested JSON
-        r'\{.*?\}',  # Non-greedy match
-        r'\{.*\}',   # Original greedy match
+        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',
+        r'\{.*?\}',
+        r'\{.*\}',
     ]
     
     for pattern in patterns:
@@ -309,13 +361,11 @@ def extract_json_from_response(text: str) -> Union[dict, list]:
         for match in matches:
             try:
                 parsed = json.loads(match)
-                # Validate that it has the expected structure
                 if isinstance(parsed, dict) and ('thought' in parsed or 'action' in parsed):
                     return parsed
             except json.JSONDecodeError:
                 continue
     
-    # If no valid JSON found, try to extract just the content between first { and last }
     start = text.find('{')
     end = text.rfind('}')
     if start != -1 and end != -1 and end > start:
@@ -327,10 +377,8 @@ def extract_json_from_response(text: str) -> Union[dict, list]:
         except json.JSONDecodeError:
             pass
     
-    # Last resort: try to create a basic structure from any text
     if text:
         print(f"DEBUG: Failed to parse JSON from response: {text[:200]}...")
-        # Return a basic error structure
         return {
             "thought": f"Failed to parse response: {text[:100]}...",
             "action": {"type": "finish", "reason": "JSON parsing failed"}

@@ -809,8 +809,134 @@ async def navigate_to_page(state: AgentState) -> AgentState:
     
     return state
 
+# async def agent_reasoning_node(state: AgentState) -> AgentState:
+#     """🧠 AGENT REASONING NODE - Analyzes page and decides next action"""
+#     job_id = state['job_id']
+#     push_status(job_id, "agent_step", {"step": state['step'], "max_steps": state['max_steps']})
+    
+#     screenshot_path = state['job_artifacts_dir'] / f"{state['step']:02d}_step.png"
+#     screenshot_success = False
+    
+#     # 📸 Optimized screenshot (skip first 2 steps for speed)
+#     if state['step'] > 2:
+#         try:
+#             await state['page'].wait_for_timeout(500)
+#             await state['page'].screenshot(
+#                 path=screenshot_path, 
+#                 timeout=5000,
+#                 full_page=False,
+#                 type='png',
+#             )
+#             screenshot_success = True
+#             state['screenshots'].append(f"screenshots/{job_id}/{state['step']:02d}_step.png")
+#             logger.info(f"Screenshot saved: {screenshot_path}")
+#         except Exception as e:
+#             push_status(job_id, "screenshot_failed", {"error": str(e), "step": state['step']})
+#             logger.warning(f"Screenshot failed at step {state['step']}: {e}")
+#             screenshot_path = None
+
+#     # 📝 Build enhanced history with context
+#     history_text = "\n".join(state['history'])
+
+#     # 💬 Add user input context if available
+#     if state.get('user_input_response'):
+#         input_type = state.get('user_input_request', {}).get('input_type', 'input')
+#         is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
+        
+#         if is_sensitive:
+#             history_text += f"\n\n🔐 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [SENSITIVE DATA - USE THIS EXACT VALUE]"
+#             history_text += f"\n💡 CRITICAL: Use this exact value '{state['user_input_response']}' in your next fill action."
+#             history_text += f"\n🚨 DO NOT GENERATE YOUR OWN {input_type.upper()}! Use '{state['user_input_response']}' exactly as provided."
+#         else:
+#             history_text += f"\n\n👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [Ready to use in next fill action]"
+#             history_text += f"\n💡 IMPORTANT: Use this exact value '{state['user_input_response']}' in your next fill action."
+
+#     # 🚫 Add failed action warnings
+#     if state.get('failed_actions'):
+#         failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
+#         history_text += f"\n\n⚠ FAILED ACTION SIGNATURES (Do NOT repeat exactly):"
+#         for sig, count in failed_list[:8]:
+#             history_text += f"\n  - {sig} (failures={count})"
+#         history_text += ("\n🔒 RULE: Never emit an action with an identical signature to one that failed. "
+#                          "Change selector, vary interaction type, or choose a different target.")
+    
+#     # 🎯 Add found element context
+#     if state.get('found_element_context'):
+#         element_ctx = state['found_element_context']
+#         history_text += f"\n\n🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP:"
+#         history_text += f"\n• Search Text: '{element_ctx['text']}'"
+#         history_text += f"\n• Total Matches Found: {element_ctx.get('total_matches', 0)}"
+        
+#         if element_ctx.get('all_elements'):
+#             visible_elements = [e for e in element_ctx['all_elements'] if e.get('is_visible')]
+#             interactive_elements = [e for e in element_ctx['all_elements'] if e.get('is_interactive')]
+            
+#             history_text += f"\n• Found Elements: {len(visible_elements)} visible, {len(interactive_elements)} interactive"
+            
+#             for elem in element_ctx['all_elements'][:5]:  # Top 5 only
+#                 visibility_indicator = "👁️ VISIBLE" if elem.get('is_visible') else "👻 HIDDEN"
+#                 interactive_indicator = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
+                
+#                 history_text += f"\n  Element {elem['index']}: {elem['tag_name']}"
+#                 history_text += f"\n    Status: {visibility_indicator} | {interactive_indicator}"
+#                 history_text += f"\n    Selectors: {', '.join(elem['suggested_selectors'][:3])}"
+
+#     # 🤖 Get agent action
+#     try:
+#         action_response, usage = get_agent_action(
+#             query=state['refined_query'],
+#             url=state['page'].url,
+#             html=await state['page'].content(),
+#             provider=state['provider'],
+#             screenshot_path=screenshot_path if screenshot_success else None,
+#             history=history_text
+#         )
+        
+#         state['token_usage'].append({
+#             "task": f"agent_step_{state['step']}",
+#             **usage
+#         })
+
+#         push_status(job_id, "agent_thought", {
+#             "thought": action_response.get("thought", "No thought provided."),
+#             "usage": usage
+#         })
+        
+#         if not action_response or not isinstance(action_response, dict):
+#             raise ValueError("Invalid action response format")
+            
+#         action = action_response.get("action")
+#         if not action or not isinstance(action, dict) or not action.get("type"):
+#             raise ValueError("Missing or invalid action in response")
+            
+#         state['last_action'] = action
+        
+#     except Exception as e:
+#         error_msg = f"Failed to get agent action: {str(e)}"
+#         push_status(job_id, "agent_error", {"error": error_msg, "step": state['step']})
+#         logger.error(f"Agent reasoning error at step {state['step']}: {error_msg}")
+        
+#         state['last_action'] = {
+#             "type": "finish", 
+#             "reason": f"Agent reasoning failed: {error_msg}"
+#         }
+        
+#         state['token_usage'].append({
+#             "task": f"agent_step_{state['step']}_failed",
+#             "input_tokens": 0,
+#             "output_tokens": 0,
+#             "error": error_msg
+#         })
+    
+#     # Clear found element context after processing
+#     if state.get('found_element_context'):
+#         state['found_element_context'] = {}
+    
+#     return state
+
+
 async def agent_reasoning_node(state: AgentState) -> AgentState:
-    """🧠 AGENT REASONING NODE - Analyzes page and decides next action"""
+    """🧠 OPTIMIZED AGENT REASONING NODE - Smart history with element prioritization"""
     job_id = state['job_id']
     push_status(job_id, "agent_step", {"step": state['step'], "max_steps": state['max_steps']})
     
@@ -835,53 +961,124 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             logger.warning(f"Screenshot failed at step {state['step']}: {e}")
             screenshot_path = None
 
-    # 📝 Build enhanced history with context
-    history_text = "\n".join(state['history'])
-
-    # 💬 Add user input context if available
+    # 🧠 Build SMART history with element context prioritized
+    history_lines = []
+    
+    # ═══════════════════════════════════════════════════════
+    # PRIORITY 1: FOUND ELEMENT CONTEXT (Most Important!)
+    # ═══════════════════════════════════════════════════════
+    if state.get('found_element_context'):
+        ctx = state['found_element_context']
+        history_lines.append("=" * 70)
+        history_lines.append("🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP - USE THESE NOW!")
+        history_lines.append("=" * 70)
+        history_lines.append(f"🔍 Search Text: '{ctx['text']}'")
+        history_lines.append(f"📊 Total Matches: {ctx.get('total_matches', 0)}")
+        
+        if ctx.get('all_elements'):
+            visible = [e for e in ctx['all_elements'] if e.get('is_visible')]
+            interactive = [e for e in ctx['all_elements'] if e.get('is_interactive')]
+            
+            history_lines.append(f"✅ Found: {len(visible)} visible, {len(interactive)} interactive elements")
+            history_lines.append("")
+            history_lines.append("📋 READY-TO-USE SELECTORS (Pick first visible + interactive):")
+            history_lines.append("")
+            
+            # Show top 3 matches with clear priority
+            for i, elem in enumerate(ctx['all_elements'][:3], 1):
+                vis_status = "✅ VISIBLE" if elem.get('is_visible') else "❌ HIDDEN"
+                inter_status = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
+                priority = "⭐ PRIORITY" if (elem.get('is_visible') and elem.get('is_interactive')) else ""
+                
+                history_lines.append(f"  [{i}] {elem['tag_name']} {priority}")
+                history_lines.append(f"      Status: {vis_status} | {inter_status}")
+                
+                if elem['suggested_selectors']:
+                    best_selector = elem['suggested_selectors'][0]
+                    history_lines.append(f"      🎯 USE THIS: {best_selector}")
+                    if len(elem['suggested_selectors']) > 1:
+                        history_lines.append(f"      Alternatives: {', '.join(elem['suggested_selectors'][1:3])}")
+                
+                # Add interaction hint
+                if elem.get('is_visible') and elem.get('is_interactive'):
+                    history_lines.append(f"      💡 NEXT ACTION: click/fill/press with selector above")
+                
+                history_lines.append("")
+        
+        history_lines.append("=" * 70)
+        history_lines.append("🚨 CRITICAL: Use above selectors immediately. DO NOT search again!")
+        history_lines.append("=" * 70)
+        history_lines.append("")
+    
+    # ═══════════════════════════════════════════════════════
+    # PRIORITY 2: USER INPUT CONTEXT
+    # ═══════════════════════════════════════════════════════
     if state.get('user_input_response'):
         input_type = state.get('user_input_request', {}).get('input_type', 'input')
         is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
+        actual_value = state['user_input_response']
         
+        history_lines.append("─" * 70)
         if is_sensitive:
-            history_text += f"\n\n🔐 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [SENSITIVE DATA - USE THIS EXACT VALUE]"
-            history_text += f"\n💡 CRITICAL: Use this exact value '{state['user_input_response']}' in your next fill action."
-            history_text += f"\n🚨 DO NOT GENERATE YOUR OWN {input_type.upper()}! Use '{state['user_input_response']}' exactly as provided."
+            history_lines.append(f"🔐 USER PROVIDED {input_type.upper()}: {actual_value}")
+            history_lines.append(f"⚠️ CRITICAL: Use EXACTLY '{actual_value}' in your fill action")
+            history_lines.append(f"🚫 DO NOT generate fake {input_type}s like 'Password@123' or 'test123'")
+            history_lines.append(f"✅ CORRECT: {{'type': 'fill', 'selector': '#password', 'text': '{actual_value}'}}")
         else:
-            history_text += f"\n\n👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [Ready to use in next fill action]"
-            history_text += f"\n💡 IMPORTANT: Use this exact value '{state['user_input_response']}' in your next fill action."
-
-    # 🚫 Add failed action warnings
-    if state.get('failed_actions'):
-        failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
-        history_text += f"\n\n⚠ FAILED ACTION SIGNATURES (Do NOT repeat exactly):"
-        for sig, count in failed_list[:8]:
-            history_text += f"\n  - {sig} (failures={count})"
-        history_text += ("\n🔒 RULE: Never emit an action with an identical signature to one that failed. "
-                         "Change selector, vary interaction type, or choose a different target.")
+            history_lines.append(f"👤 USER PROVIDED {input_type.upper()}: {actual_value}")
+            history_lines.append(f"💡 Use this exact value in your next fill action")
+        history_lines.append("─" * 70)
+        history_lines.append("")
     
-    # 🎯 Add found element context
+    # ═══════════════════════════════════════════════════════
+    # PRIORITY 3: RECENT ACTION HISTORY (Last 8 steps only)
+    # ═══════════════════════════════════════════════════════
+    if state.get('history'):
+        history_lines.append("📜 RECENT ACTIONS (Last 8 steps):")
+        recent = state['history'][-8:]
+        for line in recent:
+            history_lines.append(f"  {line}")
+        history_lines.append("")
+    
+    # ═══════════════════════════════════════════════════════
+    # PRIORITY 4: FAILED ACTIONS WARNING
+    # ═══════════════════════════════════════════════════════
+    if state.get('failed_actions'):
+        history_lines.append("⚠️ FAILED ACTIONS - DO NOT REPEAT THESE:")
+        failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
+        for sig, count in failed_list[:5]:
+            history_lines.append(f"  ❌ {sig} (failed {count} times)")
+        history_lines.append("")
+        history_lines.append("🔄 If you need to retry, use DIFFERENT selector or search text")
+        history_lines.append("")
+    
+    # ═══════════════════════════════════════════════════════
+    # PRIORITY 5: GUIDANCE BASED ON CONTEXT
+    # ═══════════════════════════════════════════════════════
     if state.get('found_element_context'):
-        element_ctx = state['found_element_context']
-        history_text += f"\n\n🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP:"
-        history_text += f"\n• Search Text: '{element_ctx['text']}'"
-        history_text += f"\n• Total Matches Found: {element_ctx.get('total_matches', 0)}"
-        
-        if element_ctx.get('all_elements'):
-            visible_elements = [e for e in element_ctx['all_elements'] if e.get('is_visible')]
-            interactive_elements = [e for e in element_ctx['all_elements'] if e.get('is_interactive')]
-            
-            history_text += f"\n• Found Elements: {len(visible_elements)} visible, {len(interactive_elements)} interactive"
-            
-            for elem in element_ctx['all_elements'][:5]:  # Top 5 only
-                visibility_indicator = "👁️ VISIBLE" if elem.get('is_visible') else "👻 HIDDEN"
-                interactive_indicator = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
-                
-                history_text += f"\n  Element {elem['index']}: {elem['tag_name']}"
-                history_text += f"\n    Status: {visibility_indicator} | {interactive_indicator}"
-                history_text += f"\n    Selectors: {', '.join(elem['suggested_selectors'][:3])}"
+        history_lines.append("💡 NEXT STEP GUIDANCE:")
+        history_lines.append("  → You have selectors from previous search")
+        history_lines.append("  → Pick first VISIBLE + INTERACTIVE selector")
+        history_lines.append("  → Use click/fill/press action immediately")
+        history_lines.append("")
+    elif state['step'] > 1:
+        last_action_type = state.get('last_action', {}).get('type', '')
+        if last_action_type == 'extract_correct_selector_using_text':
+            history_lines.append("💡 NEXT STEP GUIDANCE:")
+            history_lines.append("  → Previous step was element search")
+            history_lines.append("  → Wait for search results in this step")
+            history_lines.append("  → If no results shown above, search may have failed")
+            history_lines.append("")
+        else:
+            history_lines.append("💡 NEXT STEP GUIDANCE:")
+            history_lines.append("  → Before clicking/filling, search for element first")
+            history_lines.append("  → Use extract_correct_selector_using_text")
+            history_lines.append("  → Then use the found selector in next step")
+            history_lines.append("")
+    
+    history_text = "\n".join(history_lines)
 
-    # 🤖 Get agent action
+    # 🤖 Get agent action with optimized prompt
     try:
         action_response, usage = get_agent_action(
             query=state['refined_query'],
@@ -897,10 +1094,14 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             **usage
         })
 
+        thought = action_response.get("thought", "No thought provided.")
         push_status(job_id, "agent_thought", {
-            "thought": action_response.get("thought", "No thought provided."),
+            "thought": thought,
             "usage": usage
         })
+        
+        # Log thought for debugging
+        logger.info(f"💭 Step {state['step']} Thought: {thought[:150]}...")
         
         if not action_response or not isinstance(action_response, dict):
             raise ValueError("Invalid action response format")
@@ -908,8 +1109,34 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
         action = action_response.get("action")
         if not action or not isinstance(action, dict) or not action.get("type"):
             raise ValueError("Missing or invalid action in response")
-            
+        
+        # 🎯 Validate action based on context
+        action_type = action.get("type")
+        
+        # If we have found elements, agent should NOT search again
+        if state.get('found_element_context') and action_type == 'extract_correct_selector_using_text':
+            logger.warning(f"⚠️ Agent tried to search again despite having found elements!")
+            # Force agent to use found elements
+            ctx = state['found_element_context']
+            if ctx.get('all_elements'):
+                first_elem = ctx['all_elements'][0]
+                if first_elem.get('suggested_selectors'):
+                    best_selector = first_elem['suggested_selectors'][0]
+                    logger.info(f"🔧 Auto-correcting: Using found selector {best_selector}")
+                    action = {"type": "click", "selector": best_selector}
+                    thought = f"Auto-corrected: Using previously found selector {best_selector}"
+        
+        # If agent is trying to click/fill without searching first (and no found elements)
+        if action_type in ['click', 'fill', 'press'] and not state.get('found_element_context'):
+            selector = action.get('selector', '')
+            # Check if selector is too generic (likely to fail)
+            generic_selectors = ['button', 'input', 'a', '.btn', 'div', 'span']
+            if selector.lower() in generic_selectors:
+                logger.warning(f"⚠️ Agent using generic selector '{selector}' without searching!")
+                # This will likely fail, but let it try so failure tracking works
+        
         state['last_action'] = action
+        logger.info(f"✅ Step {state['step']} Action: {action_type}")
         
     except Exception as e:
         error_msg = f"Failed to get agent action: {str(e)}"
@@ -928,11 +1155,22 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
             "error": error_msg
         })
     
-    # Clear found element context after processing
+    # 🧹 Clear found element context after processing
+    # (Only clear if agent actually used it or tried to use it)
     if state.get('found_element_context'):
-        state['found_element_context'] = {}
+        action_type = state['last_action'].get('type', '')
+        # Clear if agent took any interaction action (used the found elements)
+        if action_type in ['click', 'fill', 'press', 'scroll', 'extract']:
+            logger.info("🧹 Clearing found element context (used in this step)")
+            state['found_element_context'] = {}
+        # Also clear if agent tried to search again (ignored found elements)
+        elif action_type == 'extract_correct_selector_using_text':
+            logger.warning("🧹 Clearing found element context (agent searched again - will track as failure)")
+            state['found_element_context'] = {}
     
     return state
+
+
 
 async def execute_action_node(state: AgentState) -> AgentState:
     """⚡ ACTION EXECUTION NODE - Executes agent decisions with error handling"""
