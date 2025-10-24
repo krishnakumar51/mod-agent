@@ -750,58 +750,334 @@ class AgentState(TypedDict):
     user_input_flow_active: bool
 
 # ==================== LANGGRAPH NODES ====================
+
+
+# async def captcha_handler_node(state: AgentState) -> AgentState:
+#     """
+#     🤖 DEDICATED CAPTCHA HANDLER - Runs after specific actions
+    
+#     Context-aware CAPTCHA detection and solving:
+#     - Post-navigation: Quick 2s check
+#     - Post-critical-click: Deep 4s check (login/submit/signup)
+#     - Post-form-submit: Deep 5s check
+#     - Normal actions: Skip
+#     """
+#     job_id = state['job_id']
+#     page = state['page']
+#     last_action = state['last_action']
+#     action_type = last_action.get('type', '')
+    
+#     # 🎯 Determine if CAPTCHA check is needed
+#     should_check = False
+#     captcha_context = "skip"
+#     wait_time = 0
+    
+#     # === NAVIGATION: Always check ===
+#     if action_type == "navigate":
+#         should_check = True
+#         captcha_context = "navigation"
+#         wait_time = 2000
+    
+#     # === CLICK: Check if it's a critical action ===
+#     elif action_type == "click":
+#         selector = last_action.get('selector', '').lower()
+#         critical_keywords = [
+#             'submit', 'login', 'signin', 'sign-in', 'log-in',
+#             'register', 'signup', 'sign-up', 'create', 'join',
+#             'continue', 'next', 'proceed', 'checkout', 'purchase',
+#             'buy', 'confirm', 'verify', 'send', 'apply'
+#         ]
+        
+#         if any(kw in selector for kw in critical_keywords):
+#             should_check = True
+#             captcha_context = "post_click"
+#             wait_time = 4000
+    
+#     # === PRESS: Check if it's Enter (form submission) ===
+#     elif action_type == "press":
+#         key = last_action.get('key', '').lower()
+#         if key == "enter":
+#             should_check = True
+#             captcha_context = "post_form"
+#             wait_time = 5000
+    
+#     # Skip check if not needed
+#     if not should_check:
+#         return state
+    
+#     # 🤖 PERFORM CAPTCHA CHECK
+#     try:
+#         logger.info(f"🔍 CAPTCHA check: {captcha_context} (wait {wait_time}ms)")
+        
+#         # Step 1: Wait for potential auto-solve
+#         await page.wait_for_timeout(wait_time)
+        
+#         # Step 2: Check if CAPTCHA is visible
+#         captcha_check = await page.evaluate("""
+#             () => {
+#                 // Check for common CAPTCHA indicators
+#                 const checks = {
+#                     recaptcha: {
+#                         iframe: !!document.querySelector('iframe[src*="recaptcha"]'),
+#                         badge: !!document.querySelector('.grecaptcha-badge'),
+#                         challenge: !!document.querySelector('.recaptcha-checkbox')
+#                     },
+#                     hcaptcha: {
+#                         iframe: !!document.querySelector('iframe[src*="hcaptcha"]'),
+#                         checkbox: !!document.querySelector('[data-hcaptcha-response]')
+#                     },
+#                     cloudflare: {
+#                         challenge: !!document.querySelector('.cf-challenge-running'),
+#                         turnstile: !!document.querySelector('iframe[src*="turnstile"]')
+#                     },
+#                     generic: {
+#                         captcha: !!document.querySelector('[class*="captcha"]'),
+#                         challenge: !!document.querySelector('[id*="captcha"]')
+#                     }
+#                 };
+                
+#                 // Determine which CAPTCHA is present
+#                 let detected = false;
+#                 let types = [];
+                
+#                 if (checks.recaptcha.iframe || checks.recaptcha.badge) {
+#                     detected = true;
+#                     types.push('recaptcha');
+#                 }
+#                 if (checks.hcaptcha.iframe || checks.hcaptcha.checkbox) {
+#                     detected = true;
+#                     types.push('hcaptcha');
+#                 }
+#                 if (checks.cloudflare.challenge || checks.cloudflare.turnstile) {
+#                     detected = true;
+#                     types.push('cloudflare');
+#                 }
+#                 if (checks.generic.captcha || checks.generic.challenge) {
+#                     detected = true;
+#                     types.push('generic');
+#                 }
+                
+#                 return {
+#                     detected: detected,
+#                     types: types,
+#                     details: checks
+#                 };
+#             }
+#         """)
+        
+#         # If no CAPTCHA detected, return success
+#         if not captcha_check['detected']:
+#             logger.info(f"✅ No CAPTCHA detected ({captcha_context})")
+#             state['history'].append(f"Step {state['step']}: ✅ CAPTCHA check: None detected")
+#             return state
+        
+#         # 🚨 CAPTCHA DETECTED - Attempt to solve
+#         captcha_type = captcha_check['types'][0] if captcha_check['types'] else 'unknown'
+#         logger.warning(f"⚠️ CAPTCHA detected: {captcha_type} ({captcha_context})")
+        
+#         state['history'].append(f"Step {state['step']}: 🤖 CAPTCHA detected: {captcha_type}")
+#         push_status(job_id, "captcha_detected", {
+#             "type": captcha_type,
+#             "context": captcha_context,
+#             "timestamp": get_current_timestamp()
+#         })
+        
+#         # Step 3: Attempt to solve CAPTCHA
+#         try:
+#             captcha_solver = CaptchaSolver()
+#             solve_result = await captcha_solver.solve_captcha_universal(page, page.url)
+            
+#             if solve_result.get('solved', False):
+#                 logger.info(f"✅ CAPTCHA solved: {captcha_type}")
+#                 state['history'].append(f"Step {state['step']}: ✅ CAPTCHA solved: {solve_result.get('method')}")
+#                 push_status(job_id, "captcha_solved", {
+#                     "type": captcha_type,
+#                     "method": solve_result.get('method'),
+#                     "context": captcha_context
+#                 })
+                
+#                 # Extra wait after solving
+#                 await page.wait_for_timeout(2000)
+                
+#             else:
+#                 error = solve_result.get('error', 'Unknown error')
+#                 logger.error(f"❌ CAPTCHA solving failed: {error}")
+#                 state['history'].append(f"Step {state['step']}: ❌ CAPTCHA failed: {error}")
+#                 push_status(job_id, "captcha_failed", {
+#                     "type": captcha_type,
+#                     "error": error,
+#                     "context": captcha_context
+#                 })
+                
+#                 # Mark CAPTCHA as blocking issue
+#                 state['failed_actions']['captcha_blocked'] = state['failed_actions'].get('captcha_blocked', 0) + 1
+                
+#         except Exception as solve_error:
+#             logger.error(f"❌ CAPTCHA solver error: {solve_error}")
+#             state['history'].append(f"Step {state['step']}: ❌ CAPTCHA error: {str(solve_error)[:50]}")
+#             push_status(job_id, "captcha_error", {
+#                 "error": str(solve_error),
+#                 "context": captcha_context
+#             })
+        
+#     except Exception as e:
+#         logger.error(f"❌ CAPTCHA check error: {e}")
+#         state['history'].append(f"Step {state['step']}: ⚠️ CAPTCHA check failed: {str(e)[:50]}")
+    
+#     return state
+
+
+async def captcha_handler_node(state: AgentState) -> AgentState:
+    """
+    🤖 SMART CAPTCHA DETECTOR - Proactive detection with LLM guidance
+    
+    Instead of trying to solve automatically (which keeps failing),
+    this node DETECTS CAPTCHAs and prepares context for the LLM to decide.
+    """
+    job_id = state['job_id']
+    page = state['page']
+    last_action = state['last_action']
+    action_type = last_action.get('type', '')
+    
+    # Skip if LLM just explicitly solved CAPTCHA
+    if action_type == "solve_captcha":
+        return state
+    
+    # Determine check depth based on action type
+    should_check = False
+    context = "skip"
+    wait_time = 0
+    
+    if action_type == "navigate":
+        should_check = True
+        context = "navigation"
+        wait_time = 1500
+    elif action_type in ["click", "press"]:
+        selector = last_action.get('selector', '').lower()
+        critical = any(kw in selector for kw in [
+            'submit', 'login', 'signin', 'register', 'signup', 'continue'
+        ])
+        if critical:
+            should_check = True
+            context = "post_critical_action"
+            wait_time = 2000
+    
+    if not should_check:
+        return state
+    
+    try:
+        logger.info(f"🔍 CAPTCHA detection: {context} (wait {wait_time}ms)")
+        await page.wait_for_timeout(wait_time)
+        
+        # Quick CAPTCHA detection (don't solve, just detect)
+        captcha_check = await page.evaluate("""
+            () => {
+                const checks = {
+                    recaptcha: {
+                        visible: !!document.querySelector('iframe[src*="recaptcha"][style*="visible"]'),
+                        checkbox: !!document.querySelector('.recaptcha-checkbox:not([aria-checked="true"])'),
+                        challenge: !!document.querySelector('.rc-imageselect-target')
+                    },
+                    hcaptcha: {
+                        visible: !!document.querySelector('iframe[src*="hcaptcha"]'),
+                        checkbox: !!document.querySelector('[data-hcaptcha-response]')
+                    },
+                    cloudflare: {
+                        challenge: !!document.querySelector('.cf-challenge-running'),
+                        turnstile: !!document.querySelector('iframe[src*="turnstile"]')
+                    }
+                };
+                
+                let detected = null;
+                let details = null;
+                
+                if (checks.recaptcha.visible || checks.recaptcha.checkbox || checks.recaptcha.challenge) {
+                    detected = 'recaptcha';
+                    details = checks.recaptcha;
+                } else if (checks.hcaptcha.visible || checks.hcaptcha.checkbox) {
+                    detected = 'hcaptcha';
+                    details = checks.hcaptcha;
+                } else if (checks.cloudflare.challenge || checks.cloudflare.turnstile) {
+                    detected = 'cloudflare';
+                    details = checks.cloudflare;
+                }
+                
+                return {
+                    detected: !!detected,
+                    type: detected,
+                    details: details,
+                    timestamp: Date.now()
+                };
+            }
+        """)
+        
+        if captcha_check['detected']:
+            captcha_type = captcha_check['type']
+            logger.warning(f"⚠️ CAPTCHA DETECTED: {captcha_type} ({context})")
+            
+            # Add to history with CLEAR guidance for LLM
+            state['history'].append(
+                f"Step {state['step']}: 🚨 CAPTCHA DETECTED: {captcha_type.upper()}"
+            )
+            state['history'].append(
+                f"Step {state['step']}: 💡 NEXT ACTION: Use {{'type': 'solve_captcha'}} to solve it"
+            )
+            
+            # Store CAPTCHA context for LLM
+            state['found_element_context'] = {
+                "captcha_detected": True,
+                "captcha_type": captcha_type,
+                "captcha_details": captcha_check['details'],
+                "detected_at_step": state['step'],
+                "guidance": f"A {captcha_type} CAPTCHA is blocking progress. Use solve_captcha action to resolve it before proceeding."
+            }
+            
+            push_status(job_id, "captcha_detected", {
+                "type": captcha_type,
+                "context": context,
+                "step": state['step'],
+                "llm_action_required": True
+            })
+            
+        else:
+            logger.info(f"✅ No CAPTCHA detected ({context})")
+            
+    except Exception as e:
+        logger.error(f"❌ CAPTCHA detection error: {e}")
+    
+    return state
+
+
 async def navigate_to_page(state: AgentState) -> AgentState:
-    """
-    🌐 NAVIGATION NODE with UNIVERSAL CAPTCHA & POPUP protection
-    Priority: CAPTCHA → Popup Killer → Page Load
-    ✅ Upgraded with proven test.py CaptchaSolver system
-    """
+    """🌐 NAVIGATION with Smart CAPTCHA Handling"""
     try:
         logger.info(f"🌐 Navigating to: {state['query']}")
         await state['page'].goto(state['query'], wait_until='domcontentloaded', timeout=60000)
         
-        # 🛡️ Install popup killer FIRST
+        # 🛡️ Install popup killer
         try:
             await install_popup_killer(state['page'])
         except Exception as e:
-            logger.warning(f"⚠️ Popup killer installation failed (non-critical): {e}")
+            logger.warning(f"⚠️ Popup killer failed: {e}")
         
-        # 🤖 UNIVERSAL CAPTCHA HANDLING - Using proven test.py CaptchaSolver
-        logger.info("🤖 Scanning for CAPTCHAs with universal solver...")
-        try:
-            # Use the proven CaptchaSolver system from core.py (same as test.py)
-            captcha_solver = CaptchaSolver()
-            
-            # Use the universal detection and solving system
-            captcha_result = await captcha_solver.solve_captcha_universal(state['page'], state['query'])
-            
-            if captcha_result['found']:
-                if captcha_result['solved']:
-                    push_status(state['job_id'], "captcha_handled", {
-                        "url": state['query'], 
-                        "status": "solved", 
-                        "type": captcha_result['type'],
-                        "method": captcha_result['method'],
-                        "solver": "universal_proven"
-                    })
-                    logger.info(f"✅ {captcha_result['type'].upper()} CAPTCHA solved with universal solver!")
-                else:
-                    push_status(state['job_id'], "captcha_handled", {
-                        "url": state['query'], 
-                        "status": "failed", 
-                        "type": captcha_result['type'],
-                        "error": captcha_result['error'],
-                        "solver": "universal_proven"
-                    })
-                    logger.warning(f"⚠️ {captcha_result['type'].upper()} CAPTCHA detected but solving failed: {captcha_result['error']}")
+        # 🤖 SMART CAPTCHA CHECK on navigation
+        logger.info("🤖 Checking for navigation CAPTCHAs...")
+        captcha_result = await smart_captcha_check(state['page'], state['job_id'], context="navigation")
+        
+        if captcha_result["detected"]:
+            if captcha_result["solved"]:
+                push_status(state['job_id'], "captcha_handled", {
+                    "url": state['query'],
+                    "context": "navigation",
+                    "type": captcha_result['type'],
+                    "method": captcha_result['method']
+                })
+                logger.info(f"✅ Navigation CAPTCHA solved!")
             else:
-                logger.info("ℹ️ No CAPTCHA detected - proceeding with normal automation")
-        except Exception as e:
-            logger.warning(f"⚠️ CAPTCHA scan error (non-critical): {e}")
-            push_status(state['job_id'], "captcha_handled", {"url": state['query'], "status": "error", "error": str(e)})
+                logger.warning(f"⚠️ Navigation CAPTCHA failed: {captcha_result.get('error')}")
         
         push_status(state['job_id'], "navigation_complete", {"url": state['query']})
-        logger.info(f"✅ Navigation completed: {state['query']}")
+        logger.info(f"✅ Navigation completed")
         
     except Exception as e:
         push_status(state['job_id'], "navigation_failed", {"url": state['query'], "error": str(e)})
@@ -809,130 +1085,116 @@ async def navigate_to_page(state: AgentState) -> AgentState:
     
     return state
 
-# async def agent_reasoning_node(state: AgentState) -> AgentState:
-#     """🧠 AGENT REASONING NODE - Analyzes page and decides next action"""
-#     job_id = state['job_id']
-#     push_status(job_id, "agent_step", {"step": state['step'], "max_steps": state['max_steps']})
-    
-#     screenshot_path = state['job_artifacts_dir'] / f"{state['step']:02d}_step.png"
-#     screenshot_success = False
-    
-#     # 📸 Optimized screenshot (skip first 2 steps for speed)
-#     if state['step'] > 2:
-#         try:
-#             await state['page'].wait_for_timeout(500)
-#             await state['page'].screenshot(
-#                 path=screenshot_path, 
-#                 timeout=5000,
-#                 full_page=False,
-#                 type='png',
-#             )
-#             screenshot_success = True
-#             state['screenshots'].append(f"screenshots/{job_id}/{state['step']:02d}_step.png")
-#             logger.info(f"Screenshot saved: {screenshot_path}")
-#         except Exception as e:
-#             push_status(job_id, "screenshot_failed", {"error": str(e), "step": state['step']})
-#             logger.warning(f"Screenshot failed at step {state['step']}: {e}")
-#             screenshot_path = None
 
-#     # 📝 Build enhanced history with context
-#     history_text = "\n".join(state['history'])
 
-#     # 💬 Add user input context if available
-#     if state.get('user_input_response'):
-#         input_type = state.get('user_input_request', {}).get('input_type', 'input')
-#         is_sensitive = state.get('user_input_request', {}).get('is_sensitive', False)
+
+async def smart_captcha_check(page, job_id: str, context: str = "general"):
+    """
+    🤖 SMART CAPTCHA HANDLER - Context-aware detection & solving
+    
+    Args:
+        page: Playwright page object
+        job_id: Job ID for status updates
+        context: "post_form", "post_login", "general", "navigation"
+    
+    Returns:
+        dict: {"detected": bool, "solved": bool, "waited": bool, "type": str}
+    """
+    result = {
+        "detected": False,
+        "solved": False,
+        "waited": False,
+        "auto_solved": False,
+        "type": None,
+        "method": None,
+        "error": None
+    }
+    
+    # 🎯 Context-based wait strategy
+    wait_times = {
+        "post_form": 4000,      # Forms often trigger CAPTCHA
+        "post_login": 5000,     # Login attempts = high CAPTCHA risk
+        "navigation": 2000,     # Page load = moderate risk
+        "general": 1500         # General check = low wait
+    }
+    
+    initial_wait = wait_times.get(context, 1500)
+    
+    try:
+        # ⏱️ STEP 1: Give page time to auto-solve CAPTCHA
+        logger.info(f"🤖 Waiting {initial_wait}ms for potential auto-CAPTCHA solve ({context})...")
+        await page.wait_for_timeout(initial_wait)
+        result["waited"] = True
         
-#         if is_sensitive:
-#             history_text += f"\n\n🔐 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [SENSITIVE DATA - USE THIS EXACT VALUE]"
-#             history_text += f"\n💡 CRITICAL: Use this exact value '{state['user_input_response']}' in your next fill action."
-#             history_text += f"\n🚨 DO NOT GENERATE YOUR OWN {input_type.upper()}! Use '{state['user_input_response']}' exactly as provided."
-#         else:
-#             history_text += f"\n\n👤 USER PROVIDED {input_type.upper()}: {state['user_input_response']} [Ready to use in next fill action]"
-#             history_text += f"\n💡 IMPORTANT: Use this exact value '{state['user_input_response']}' in your next fill action."
-
-#     # 🚫 Add failed action warnings
-#     if state.get('failed_actions'):
-#         failed_list = sorted(state['failed_actions'].items(), key=lambda x: -x[1])
-#         history_text += f"\n\n⚠ FAILED ACTION SIGNATURES (Do NOT repeat exactly):"
-#         for sig, count in failed_list[:8]:
-#             history_text += f"\n  - {sig} (failures={count})"
-#         history_text += ("\n🔒 RULE: Never emit an action with an identical signature to one that failed. "
-#                          "Change selector, vary interaction type, or choose a different target.")
-    
-#     # 🎯 Add found element context
-#     if state.get('found_element_context'):
-#         element_ctx = state['found_element_context']
-#         history_text += f"\n\n🎯 ELEMENT SEARCH RESULTS FROM PREVIOUS STEP:"
-#         history_text += f"\n• Search Text: '{element_ctx['text']}'"
-#         history_text += f"\n• Total Matches Found: {element_ctx.get('total_matches', 0)}"
-        
-#         if element_ctx.get('all_elements'):
-#             visible_elements = [e for e in element_ctx['all_elements'] if e.get('is_visible')]
-#             interactive_elements = [e for e in element_ctx['all_elements'] if e.get('is_interactive')]
-            
-#             history_text += f"\n• Found Elements: {len(visible_elements)} visible, {len(interactive_elements)} interactive"
-            
-#             for elem in element_ctx['all_elements'][:5]:  # Top 5 only
-#                 visibility_indicator = "👁️ VISIBLE" if elem.get('is_visible') else "👻 HIDDEN"
-#                 interactive_indicator = "🖱️ INTERACTIVE" if elem.get('is_interactive') else "📄 STATIC"
+        # 🔍 STEP 2: Quick check - is CAPTCHA still visible?
+        captcha_indicators = await page.evaluate("""
+            () => {
+                // Check for common CAPTCHA iframes/elements
+                const checks = {
+                    recaptcha: !!document.querySelector('iframe[src*="recaptcha"]'),
+                    hcaptcha: !!document.querySelector('iframe[src*="hcaptcha"]'),
+                    cloudflare: !!document.querySelector('.cf-challenge-running') || 
+                                !!document.querySelector('#challenge-running'),
+                    turnstile: !!document.querySelector('iframe[src*="turnstile"]'),
+                    generic: !!document.querySelector('[class*="captcha"]') || 
+                             !!document.querySelector('[id*="captcha"]')
+                };
                 
-#                 history_text += f"\n  Element {elem['index']}: {elem['tag_name']}"
-#                 history_text += f"\n    Status: {visibility_indicator} | {interactive_indicator}"
-#                 history_text += f"\n    Selectors: {', '.join(elem['suggested_selectors'][:3])}"
+                return {
+                    detected: Object.values(checks).some(v => v),
+                    types: Object.entries(checks).filter(([k,v]) => v).map(([k]) => k)
+                };
+            }
+        """)
+        
+        if not captcha_indicators["detected"]:
+            logger.info("✅ No CAPTCHA detected or auto-solved successfully")
+            result["auto_solved"] = True
+            return result
+        
+        # 🚨 CAPTCHA DETECTED - Attempt active solving
+        result["detected"] = True
+        result["type"] = captcha_indicators["types"][0] if captcha_indicators["types"] else "unknown"
+        
+        logger.warning(f"⚠️ CAPTCHA detected: {result['type']} - attempting to solve...")
+        push_status(job_id, "captcha_detected", {
+            "context": context,
+            "type": result['type'],
+            "auto_solve_failed": True
+        })
+        
+        # 🔧 STEP 3: Active CAPTCHA solving
+        captcha_solver = CaptchaSolver()
+        solve_result = await captcha_solver.solve_captcha_universal(page, page.url)
+        
+        result["solved"] = solve_result.get("solved", False)
+        result["method"] = solve_result.get("method")
+        result["error"] = solve_result.get("error")
+        
+        if result["solved"]:
+            logger.info(f"✅ CAPTCHA solved successfully using {result['method']}")
+            push_status(job_id, "captcha_solved", {
+                "context": context,
+                "type": result['type'],
+                "method": result['method']
+            })
+            # Extra wait after solving
+            await page.wait_for_timeout(2000)
+        else:
+            logger.error(f"❌ CAPTCHA solving failed: {result['error']}")
+            push_status(job_id, "captcha_failed", {
+                "context": context,
+                "type": result['type'],
+                "error": result['error']
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ CAPTCHA check error: {e}")
+        result["error"] = str(e)
+        return result
 
-#     # 🤖 Get agent action
-#     try:
-#         action_response, usage = get_agent_action(
-#             query=state['refined_query'],
-#             url=state['page'].url,
-#             html=await state['page'].content(),
-#             provider=state['provider'],
-#             screenshot_path=screenshot_path if screenshot_success else None,
-#             history=history_text
-#         )
-        
-#         state['token_usage'].append({
-#             "task": f"agent_step_{state['step']}",
-#             **usage
-#         })
-
-#         push_status(job_id, "agent_thought", {
-#             "thought": action_response.get("thought", "No thought provided."),
-#             "usage": usage
-#         })
-        
-#         if not action_response or not isinstance(action_response, dict):
-#             raise ValueError("Invalid action response format")
-            
-#         action = action_response.get("action")
-#         if not action or not isinstance(action, dict) or not action.get("type"):
-#             raise ValueError("Missing or invalid action in response")
-            
-#         state['last_action'] = action
-        
-#     except Exception as e:
-#         error_msg = f"Failed to get agent action: {str(e)}"
-#         push_status(job_id, "agent_error", {"error": error_msg, "step": state['step']})
-#         logger.error(f"Agent reasoning error at step {state['step']}: {error_msg}")
-        
-#         state['last_action'] = {
-#             "type": "finish", 
-#             "reason": f"Agent reasoning failed: {error_msg}"
-#         }
-        
-#         state['token_usage'].append({
-#             "task": f"agent_step_{state['step']}_failed",
-#             "input_tokens": 0,
-#             "output_tokens": 0,
-#             "error": error_msg
-#         })
-    
-#     # Clear found element context after processing
-#     if state.get('found_element_context'):
-#         state['found_element_context'] = {}
-    
-#     return state
 
 
 async def agent_reasoning_node(state: AgentState) -> AgentState:
@@ -1172,25 +1434,490 @@ async def agent_reasoning_node(state: AgentState) -> AgentState:
 
 
 
+# async def execute_action_node(state: AgentState) -> AgentState:
+#     """⚡ ACTION EXECUTION NODE - Original flow + Smart CAPTCHA"""
+#     job_id = state['job_id']
+#     action = state['last_action']
+#     page = state['page']
+    
+#     # Build signature for tracking
+#     action_signature = make_action_signature(action)
+#     state['attempted_action_signatures'].append(action_signature)
+
+#     # Skip if previously failed
+#     if action_signature in state.get('failed_actions', {}):
+#         state['history'].append(f"Step {state['step']}: ⏭ Skipped duplicate failed action")
+#         state['token_usage'].append({
+#             "task": f"action_skip_{state['step']}",
+#             "input_tokens": 0,
+#             "output_tokens": 0,
+#             "skipped_signature": action_signature
+#         })
+#         state['step'] += 1
+#         return state
+
+#     push_status(job_id, "executing_action", {"action": action})
+#     action_success = False
+    
+#     try:
+#         action_type = action.get("type")
+        
+#         # ==== CLICK ACTION ====
+#         if action_type == "click":
+#             await page.locator(action["selector"]).click(timeout=5000)
+#             action_success = True
+            
+#             # 🤖 SMART CAPTCHA CHECK after critical clicks
+#             selector_lower = action.get("selector", "").lower()
+#             is_critical_click = any(kw in selector_lower for kw in [
+#                 "submit", "login", "signin", "sign-in", "register", "signup",
+#                 "sign-up", "continue", "next", "checkout", "purchase", "buy",
+#                 "confirm", "verify", "send", "join", "create"
+#             ])
+            
+#             if is_critical_click:
+#                 logger.info(f"🎯 Critical click detected: {action['selector']} - checking for CAPTCHA...")
+#                 captcha_result = await smart_captcha_check(page, job_id, context="post_form")
+                
+#                 if captcha_result["detected"]:
+#                     if captcha_result["solved"]:
+#                         state['history'].append(f"Step {state['step']}: 🔓 Post-click CAPTCHA solved")
+#                     else:
+#                         state['history'].append(f"Step {state['step']}: ⚠️ CAPTCHA detected but not solved")
+#                 elif captcha_result["waited"]:
+#                     state['history'].append(f"Step {state['step']}: ✅ No CAPTCHA (or auto-solved)")
+        
+#         # ==== FILL ACTION ====
+#         elif action_type == "fill":
+#             fill_text = action["text"]
+#             used_user_input = False
+            
+#             # Handle user input placeholders
+#             if fill_text in ["{{USER_INPUT}}", "{{PASSWORD}}", "{{EMAIL}}", "{{PHONE}}", "{{OTP}}"]:
+#                 if state.get('user_input_response'):
+#                     fill_text = state['user_input_response']
+#                     used_user_input = True
+#                 else:
+#                     raise ValueError(f"Placeholder {fill_text} requires user input but none available")
+            
+#             # Direct user input match
+#             elif state.get('user_input_response') and fill_text == state['user_input_response']:
+#                 used_user_input = True
+            
+#             # FORCE USER PASSWORD for password fields
+#             elif (state.get('user_input_response') and 
+#                   ('password' in action.get('selector', '').lower() or 
+#                    'pass' in action.get('selector', '').lower()) and
+#                   state.get('user_input_request', {}).get('input_type') == 'password'):
+#                 fill_text = state['user_input_response']
+#                 used_user_input = True
+#                 state['history'].append(f"Step {state['step']}: 🔐 Forced user password (LLM override)")
+            
+#             # SUSPICIOUS PASSWORD PATTERN override
+#             elif (state.get('user_input_response') and 
+#                   state.get('user_input_request', {}).get('input_type') == 'password' and
+#                   len(fill_text) > 6 and any(c.isdigit() for c in fill_text) and any(c.isupper() for c in fill_text)):
+#                 fill_text = state['user_input_response']
+#                 used_user_input = True
+#                 state['history'].append(f"Step {state['step']}: 🔐 Overrode suspicious password pattern")
+            
+#             # Delay for password fields
+#             if 'password' in action.get('selector', '').lower():
+#                 await page.wait_for_timeout(1000)
+            
+#             await page.locator(action["selector"]).fill(fill_text, timeout=10000)
+#             action_success = True
+            
+#             # Clean up user input state
+#             if used_user_input:
+#                 state['user_input_response'] = ""
+#                 state['user_input_request'] = {}
+#                 state['user_input_flow_active'] = False
+#                 JOBS_IN_INPUT_FLOW.discard(job_id)
+#                 state['history'].append(f"Step {state['step']}: ✅ User input used, flow complete")
+        
+#         # ==== PRESS ACTION (HIGH CAPTCHA RISK) ====
+#         elif action_type == "press":
+#             await page.locator(action["selector"]).press(action["key"], timeout=5000)
+#             action_success = True
+            
+#             # 🤖 CAPTCHA CHECK after Enter key (form submission)
+#             if action["key"].lower() == "enter":
+#                 logger.info(f"🎯 Enter key pressed on {action['selector']} - checking for CAPTCHA...")
+#                 captcha_result = await smart_captcha_check(page, job_id, context="post_form")
+                
+#                 if captcha_result["detected"] and captcha_result["solved"]:
+#                     state['history'].append(f"Step {state['step']}: 🔓 Post-Enter CAPTCHA solved")
+        
+#         # ==== SCROLL ACTION ====
+#         elif action_type == "scroll":
+#             await page.evaluate("window.scrollBy(0, window.innerHeight)")
+#             action_success = True
+        
+#         # ==== EXTRACT ACTION ====
+#         elif action_type == "extract":
+#             items = action.get("items", [])
+#             for item in items:
+#                 if 'url' in item and isinstance(item.get('url'), str):
+#                     item['url'] = urljoin(page.url, item['url'])
+#             state['results'].extend(items)
+#             action_success = True
+#             push_status(job_id, "partial_result", {"new_items_found": len(items)})
+        
+#         # ==== POPUP DISMISSAL (Trust proactive killer) ====
+#         elif action_type == "dismiss_popup_using_text":
+#             try:
+#                 kill_count = await page.evaluate("window.__popupKillCount ? window.__popupKillCount() : 0")
+#                 state['history'].append(f"Step {state['step']}: ℹ️ Proactive killer active ({kill_count} popups removed)")
+#                 action_success = True
+#                 await page.wait_for_timeout(500)
+#             except Exception as e:
+#                 error_msg = str(e)[:100]
+#                 state['history'].append(f"Step {state['step']}: ⚠️ Popup check note: {error_msg}")
+        
+#         # ==== ELEMENT SEARCH ====
+#         elif action_type == "extract_correct_selector_using_text":
+#             search_text = action.get("text", "")
+#             if not search_text:
+#                 raise ValueError("No text provided for element search")
+            
+#             result = await find_elements_with_text_live(page, search_text)
+            
+#             if result:
+#                 limited_result = result[:6]
+#                 all_selectors = []
+#                 all_elements_context = []
+                
+#                 for i, match in enumerate(limited_result):
+#                     all_selectors.extend(match.get('suggested_selectors', []))
+#                     all_elements_context.append({
+#                         "index": i + 1,
+#                         "tag_name": match.get('tag_name'),
+#                         "suggested_selectors": match.get('suggested_selectors', []),
+#                         "is_visible": match.get('is_visible'),
+#                         "is_interactive": match.get('is_interactive')
+#                     })
+                
+#                 state['found_element_context'] = {
+#                     "text": search_text,
+#                     "total_matches": len(limited_result),
+#                     "all_elements": all_elements_context,
+#                     "all_suggested_selectors": all_selectors
+#                 }
+                
+#                 state['history'].append(f"Step {state['step']}: ✅ Found {len(limited_result)} elements")
+#                 action_success = True
+#             else:
+#                 state['history'].append(f"Step {state['step']}: ❌ No elements found")
+        
+#         # ==== USER INPUT REQUEST ====
+#         elif action_type == "request_user_input":
+#             input_type = action.get("input_type", "text")
+#             prompt = action.get("prompt", "Please provide input")
+#             is_sensitive = action.get("is_sensitive", False)
+            
+#             user_input_request = {
+#                 "input_type": input_type,
+#                 "prompt": prompt,
+#                 "is_sensitive": is_sensitive,
+#                 "timestamp": get_current_timestamp(),
+#                 "step": state['step']
+#             }
+            
+#             USER_INPUT_REQUESTS[job_id] = user_input_request
+#             state['user_input_request'] = user_input_request
+#             state['waiting_for_user_input'] = True
+#             state['user_input_flow_active'] = True
+#             JOBS_IN_INPUT_FLOW.add(job_id)
+            
+#             input_event = asyncio.Event()
+#             PENDING_JOBS[job_id] = input_event
+            
+#             push_status(job_id, "user_input_required", {
+#                 "input_type": input_type,
+#                 "prompt": prompt,
+#                 "is_sensitive": is_sensitive
+#             })
+            
+#             state['history'].append(f"Step {state['step']}: 🔄 Waiting for user input")
+            
+#             try:
+#                 await asyncio.wait_for(input_event.wait(), timeout=300)
+#                 user_response = USER_INPUT_RESPONSES.get(job_id, "")
+#                 state['user_input_response'] = user_response
+#                 state['waiting_for_user_input'] = False
+                
+#                 USER_INPUT_REQUESTS.pop(job_id, None)
+#                 USER_INPUT_RESPONSES.pop(job_id, None)
+#                 PENDING_JOBS.pop(job_id, None)
+                
+#                 state['history'].append(f"Step {state['step']}: ✅ User input received")
+#                 action_success = True
+                
+#             except asyncio.TimeoutError:
+#                 state['waiting_for_user_input'] = False
+#                 state['user_input_flow_active'] = False
+#                 JOBS_IN_INPUT_FLOW.discard(job_id)
+#                 USER_INPUT_REQUESTS.pop(job_id, None)
+#                 PENDING_JOBS.pop(job_id, None)
+#                 raise ValueError(f"User input timeout: {prompt}")
+        
+#         # ==== FINISH ACTION ====
+#         elif action_type == "finish":
+#             action_success = True
+#             state['history'].append(f"Step {state['step']}: 🏁 Finishing: {action.get('reason', 'Task complete')}")
+        
+#         # SUCCESS PATH
+#         if action_success:
+#             state['history'].append(f"Step {state['step']}: ✅ {action_type} successful")
+#             await page.wait_for_timeout(300)
+        
+#     except Exception as e:
+#         error_msg = str(e)[:100]
+#         state['history'].append(f"Step {state['step']}: ❌ FAILED {action_type}: {error_msg}")
+#         state['failed_actions'][action_signature] = state['failed_actions'].get(action_signature, 0) + 1
+#         push_status(job_id, "action_failed", {"action": action, "error": error_msg})
+    
+#     # ==== LOGIN FAILURE DETECTION (Only for login actions that succeeded) ====
+#     if action_success and action_type in ["click", "press"]:
+#         selector_lower = action.get("selector", "").lower()
+#         if any(kw in selector_lower for kw in ["login", "signin", "submit", "sign-in"]):
+#             try:
+#                 await page.wait_for_timeout(2000)
+#                 page_content = await page.content()
+#                 if detect_login_failure(page_content, page.url):
+#                     state['history'].append(f"Step {state['step']}: 🚫 Login failure detected")
+#                     push_status(job_id, "login_failure_detected", {"step": state['step']})
+#             except:
+#                 pass
+    
+#     state['step'] += 1
+#     return state
+
+
+# async def execute_action_node(state: AgentState) -> AgentState:
+#     """⚡ ACTION EXECUTION - Simplified, delegates CAPTCHA to dedicated node"""
+#     job_id = state['job_id']
+#     action = state['last_action']
+#     page = state['page']
+    
+#     action_signature = make_action_signature(action)
+#     state['attempted_action_signatures'].append(action_signature)
+
+#     # Skip duplicate failures
+#     if action_signature in state.get('failed_actions', {}):
+#         state['history'].append(f"Step {state['step']}: ⏭ Skipped duplicate failed action")
+#         state['step'] += 1
+#         return state
+
+#     push_status(job_id, "executing_action", {"action": action})
+#     action_success = False
+    
+#     try:
+#         action_type = action.get("type")
+        
+#         # ==== CLICK ACTION ====
+#         if action_type == "click":
+#             selector = action["selector"]
+#             await page.locator(selector).click(timeout=5000)
+#             action_success = True
+        
+#         # ==== FILL ACTION ====
+#         elif action_type == "fill":
+#             selector = action["selector"]
+#             fill_text = action["text"]
+#             used_user_input = False
+            
+#             # Handle user input placeholders
+#             if fill_text in ["{{USER_INPUT}}", "{{PASSWORD}}", "{{EMAIL}}", "{{PHONE}}", "{{OTP}}"]:
+#                 if state.get('user_input_response'):
+#                     fill_text = state['user_input_response']
+#                     used_user_input = True
+#                 else:
+#                     raise ValueError(f"Placeholder {fill_text} requires user input")
+            
+#             elif state.get('user_input_response') and fill_text == state['user_input_response']:
+#                 used_user_input = True
+            
+#             # Force user password for password fields
+#             elif (state.get('user_input_response') and 
+#                   ('password' in selector.lower() or 'pass' in selector.lower()) and
+#                   state.get('user_input_request', {}).get('input_type') == 'password'):
+#                 fill_text = state['user_input_response']
+#                 used_user_input = True
+#                 state['history'].append(f"Step {state['step']}: 🔒 Using user password")
+            
+#             await page.locator(selector).fill(fill_text, timeout=8000)
+#             action_success = True
+            
+#             if used_user_input:
+#                 state['user_input_response'] = ""
+#                 state['user_input_request'] = {}
+#                 state['user_input_flow_active'] = False
+#                 JOBS_IN_INPUT_FLOW.discard(job_id)
+        
+#         # ==== PRESS ACTION ====
+#         elif action_type == "press":
+#             selector = action["selector"]
+#             key = action["key"]
+#             await page.locator(selector).press(key, timeout=5000)
+#             action_success = True
+        
+#         # ==== SCROLL ACTION ====
+#         elif action_type == "scroll":
+#             await page.evaluate("window.scrollBy(0, window.innerHeight)")
+#             action_success = True
+#             await page.wait_for_timeout(300)
+        
+#         # ==== EXTRACT ACTION ====
+#         elif action_type == "extract":
+#             items = action.get("items", [])
+#             for item in items:
+#                 if 'url' in item and isinstance(item.get('url'), str):
+#                     item['url'] = urljoin(page.url, item['url'])
+#             state['results'].extend(items)
+#             action_success = True
+#             push_status(job_id, "partial_result", {"new_items_found": len(items)})
+        
+#         # ==== POPUP DISMISSAL ====
+#         elif action_type == "dismiss_popup_using_text":
+#             try:
+#                 kill_count = await page.evaluate("window.__popupKillCount ? window.__popupKillCount() : 0")
+#                 state['history'].append(f"Step {state['step']}: ℹ️ Popup killer: {kill_count} removed")
+#                 action_success = True
+#             except Exception as e:
+#                 state['history'].append(f"Step {state['step']}: ⚠️ Popup check: {str(e)[:50]}")
+        
+#         # ==== ELEMENT SEARCH ====
+#         elif action_type == "extract_correct_selector_using_text":
+#             search_text = action.get("text", "")
+#             if not search_text:
+#                 raise ValueError("No text provided for element search")
+            
+#             result = await find_elements_with_text_live(page, search_text)
+            
+#             if result:
+#                 limited_result = result[:5]
+#                 all_elements_context = []
+                
+#                 for i, match in enumerate(limited_result):
+#                     all_elements_context.append({
+#                         "index": i + 1,
+#                         "tag_name": match.get('tag_name'),
+#                         "suggested_selectors": match.get('suggested_selectors', []),
+#                         "is_visible": match.get('is_visible'),
+#                         "is_interactive": match.get('is_interactive')
+#                     })
+                
+#                 state['found_element_context'] = {
+#                     "text": search_text,
+#                     "total_matches": len(limited_result),
+#                     "all_elements": all_elements_context
+#                 }
+                
+#                 state['history'].append(f"Step {state['step']}: ⚡ Found {len(limited_result)} elements")
+#                 action_success = True
+#             else:
+#                 state['history'].append(f"Step {state['step']}: ❌ No elements found for '{search_text}'")
+        
+#         # ==== USER INPUT REQUEST ====
+#         elif action_type == "request_user_input":
+#             input_type = action.get("input_type", "text")
+#             prompt = action.get("prompt", "Please provide input")
+#             is_sensitive = action.get("is_sensitive", False)
+            
+#             user_input_request = {
+#                 "input_type": input_type,
+#                 "prompt": prompt,
+#                 "is_sensitive": is_sensitive,
+#                 "timestamp": get_current_timestamp(),
+#                 "step": state['step']
+#             }
+            
+#             USER_INPUT_REQUESTS[job_id] = user_input_request
+#             state['user_input_request'] = user_input_request
+#             state['waiting_for_user_input'] = True
+#             state['user_input_flow_active'] = True
+#             JOBS_IN_INPUT_FLOW.add(job_id)
+            
+#             input_event = asyncio.Event()
+#             PENDING_JOBS[job_id] = input_event
+            
+#             push_status(job_id, "user_input_required", {
+#                 "input_type": input_type,
+#                 "prompt": prompt,
+#                 "is_sensitive": is_sensitive
+#             })
+            
+#             state['history'].append(f"Step {state['step']}: 🔄 Waiting for user input")
+            
+#             try:
+#                 await asyncio.wait_for(input_event.wait(), timeout=300)
+#                 user_response = USER_INPUT_RESPONSES.get(job_id, "")
+#                 state['user_input_response'] = user_response
+#                 state['waiting_for_user_input'] = False
+                
+#                 USER_INPUT_REQUESTS.pop(job_id, None)
+#                 USER_INPUT_RESPONSES.pop(job_id, None)
+#                 PENDING_JOBS.pop(job_id, None)
+                
+#                 state['history'].append(f"Step {state['step']}: ✅ User input received")
+#                 action_success = True
+                
+#             except asyncio.TimeoutError:
+#                 state['waiting_for_user_input'] = False
+#                 state['user_input_flow_active'] = False
+#                 JOBS_IN_INPUT_FLOW.discard(job_id)
+#                 USER_INPUT_REQUESTS.pop(job_id, None)
+#                 PENDING_JOBS.pop(job_id, None)
+#                 raise ValueError(f"User input timeout: {prompt}")
+        
+#         # ==== FINISH ACTION ====
+#         elif action_type == "finish":
+#             action_success = True
+#             state['history'].append(f"Step {state['step']}: 🏁 {action.get('reason', 'Complete')}")
+        
+#         # SUCCESS PATH
+#         if action_success:
+#             state['history'].append(f"Step {state['step']}: ✅ {action_type}")
+#             await page.wait_for_timeout(200)
+        
+#     except Exception as e:
+#         error_msg = str(e)[:100]
+#         state['history'].append(f"Step {state['step']}: ❌ {action_type}: {error_msg}")
+#         state['failed_actions'][action_signature] = state['failed_actions'].get(action_signature, 0) + 1
+#         push_status(job_id, "action_failed", {"action": action, "error": error_msg})
+    
+#     # ==== LOGIN FAILURE DETECTION ====
+#     if action_success and action_type in ["click", "press"]:
+#         selector_lower = action.get("selector", "").lower()
+#         if any(kw in selector_lower for kw in ["login", "signin", "submit"]):
+#             try:
+#                 await page.wait_for_timeout(1500)
+#                 page_content = await page.content()
+#                 if detect_login_failure(page_content, page.url):
+#                     state['history'].append(f"Step {state['step']}: 🚫 Login failure detected")
+#                     push_status(job_id, "login_failure_detected", {"step": state['step']})
+#             except:
+#                 pass
+    
+#     state['step'] += 1
+#     return state
+
+
+
 async def execute_action_node(state: AgentState) -> AgentState:
-    """⚡ ACTION EXECUTION NODE - Executes agent decisions with error handling"""
+    """⚡ ACTION EXECUTION with CAPTCHA as explicit action"""
     job_id = state['job_id']
     action = state['last_action']
     page = state['page']
     
-    # Build signature for tracking
     action_signature = make_action_signature(action)
     state['attempted_action_signatures'].append(action_signature)
 
-    # Skip if previously failed
+    # Skip duplicate failures
     if action_signature in state.get('failed_actions', {}):
         state['history'].append(f"Step {state['step']}: ⏭ Skipped duplicate failed action")
-        state['token_usage'].append({
-            "task": f"action_skip_{state['step']}",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "skipped_signature": action_signature
-        })
         state['step'] += 1
         return state
 
@@ -1200,13 +1927,58 @@ async def execute_action_node(state: AgentState) -> AgentState:
     try:
         action_type = action.get("type")
         
+        # ==== 🆕 SOLVE_CAPTCHA ACTION (NEW!) ====
+        if action_type == "solve_captcha":
+            logger.info(f"🤖 LLM requested CAPTCHA solving explicitly")
+            state['history'].append(f"Step {state['step']}: 🤖 Starting CAPTCHA solve...")
+            
+            try:
+                # Import your CaptchaSolver
+                from core import CaptchaSolver
+                captcha_solver = CaptchaSolver()
+                
+                # Detect and solve
+                result = await captcha_solver.solve_captcha_universal(page, page.url)
+                
+                if result.get('solved', False):
+                    action_success = True
+                    state['history'].append(
+                        f"Step {state['step']}: ✅ CAPTCHA solved: {result.get('type')} via {result.get('method')}"
+                    )
+                    push_status(job_id, "captcha_solved", {
+                        "type": result.get('type'),
+                        "method": result.get('method'),
+                        "step": state['step']
+                    })
+                    
+                    # Wait for page to process solution
+                    await page.wait_for_timeout(3000)
+                    
+                else:
+                    error = result.get('error', 'Unknown error')
+                    state['history'].append(f"Step {state['step']}: ❌ CAPTCHA failed: {error}")
+                    push_status(job_id, "captcha_failed", {
+                        "error": error,
+                        "step": state['step']
+                    })
+                    
+                    # Mark as failed action
+                    state['failed_actions'][action_signature] = state['failed_actions'].get(action_signature, 0) + 1
+                    
+            except Exception as e:
+                error_msg = str(e)[:100]
+                state['history'].append(f"Step {state['step']}: ❌ CAPTCHA error: {error_msg}")
+                push_status(job_id, "captcha_error", {"error": error_msg})
+        
         # ==== CLICK ACTION ====
-        if action_type == "click":
-            await page.locator(action["selector"]).click(timeout=5000)
+        elif action_type == "click":
+            selector = action["selector"]
+            await page.locator(selector).click(timeout=5000)
             action_success = True
         
         # ==== FILL ACTION ====
         elif action_type == "fill":
+            selector = action["selector"]
             fill_text = action["text"]
             used_user_input = False
             
@@ -1216,53 +1988,40 @@ async def execute_action_node(state: AgentState) -> AgentState:
                     fill_text = state['user_input_response']
                     used_user_input = True
                 else:
-                    raise ValueError(f"Placeholder {fill_text} requires user input but none available")
+                    raise ValueError(f"Placeholder {fill_text} requires user input")
             
-            # Direct user input match
             elif state.get('user_input_response') and fill_text == state['user_input_response']:
                 used_user_input = True
             
-            # FORCE USER PASSWORD for password fields
+            # Force user password for password fields
             elif (state.get('user_input_response') and 
-                  ('password' in action.get('selector', '').lower() or 
-                   'pass' in action.get('selector', '').lower()) and
+                  ('password' in selector.lower() or 'pass' in selector.lower()) and
                   state.get('user_input_request', {}).get('input_type') == 'password'):
                 fill_text = state['user_input_response']
                 used_user_input = True
-                state['history'].append(f"Step {state['step']}: 🔐 Forced user password (LLM override)")
+                state['history'].append(f"Step {state['step']}: 🔑 Using user password")
             
-            # SUSPICIOUS PASSWORD PATTERN override
-            elif (state.get('user_input_response') and 
-                  state.get('user_input_request', {}).get('input_type') == 'password' and
-                  len(fill_text) > 6 and any(c.isdigit() for c in fill_text) and any(c.isupper() for c in fill_text)):
-                fill_text = state['user_input_response']
-                used_user_input = True
-                state['history'].append(f"Step {state['step']}: 🔐 Overrode suspicious password pattern")
-            
-            # Delay for password fields
-            if 'password' in action.get('selector', '').lower():
-                await page.wait_for_timeout(1000)
-            
-            await page.locator(action["selector"]).fill(fill_text, timeout=10000)
+            await page.locator(selector).fill(fill_text, timeout=8000)
             action_success = True
             
-            # Clean up user input state
             if used_user_input:
                 state['user_input_response'] = ""
                 state['user_input_request'] = {}
                 state['user_input_flow_active'] = False
                 JOBS_IN_INPUT_FLOW.discard(job_id)
-                state['history'].append(f"Step {state['step']}: ✅ User input used, flow complete")
         
         # ==== PRESS ACTION ====
         elif action_type == "press":
-            await page.locator(action["selector"]).press(action["key"], timeout=5000)
+            selector = action["selector"]
+            key = action["key"]
+            await page.locator(selector).press(key, timeout=5000)
             action_success = True
         
         # ==== SCROLL ACTION ====
         elif action_type == "scroll":
             await page.evaluate("window.scrollBy(0, window.innerHeight)")
             action_success = True
+            await page.wait_for_timeout(300)
         
         # ==== EXTRACT ACTION ====
         elif action_type == "extract":
@@ -1274,16 +2033,14 @@ async def execute_action_node(state: AgentState) -> AgentState:
             action_success = True
             push_status(job_id, "partial_result", {"new_items_found": len(items)})
         
-        # ==== POPUP DISMISSAL (Trust proactive killer) ====
+        # ==== POPUP DISMISSAL ====
         elif action_type == "dismiss_popup_using_text":
             try:
                 kill_count = await page.evaluate("window.__popupKillCount ? window.__popupKillCount() : 0")
-                state['history'].append(f"Step {state['step']}: ℹ️ Proactive killer active ({kill_count} popups removed)")
+                state['history'].append(f"Step {state['step']}: ℹ️ Popup killer: {kill_count} removed")
                 action_success = True
-                await page.wait_for_timeout(500)
             except Exception as e:
-                error_msg = str(e)[:100]
-                state['history'].append(f"Step {state['step']}: ⚠️ Popup check note: {error_msg}")
+                state['history'].append(f"Step {state['step']}: ⚠️ Popup check: {str(e)[:50]}")
         
         # ==== ELEMENT SEARCH ====
         elif action_type == "extract_correct_selector_using_text":
@@ -1294,12 +2051,10 @@ async def execute_action_node(state: AgentState) -> AgentState:
             result = await find_elements_with_text_live(page, search_text)
             
             if result:
-                limited_result = result[:6]
-                all_selectors = []
+                limited_result = result[:5]
                 all_elements_context = []
                 
                 for i, match in enumerate(limited_result):
-                    all_selectors.extend(match.get('suggested_selectors', []))
                     all_elements_context.append({
                         "index": i + 1,
                         "tag_name": match.get('tag_name'),
@@ -1311,14 +2066,13 @@ async def execute_action_node(state: AgentState) -> AgentState:
                 state['found_element_context'] = {
                     "text": search_text,
                     "total_matches": len(limited_result),
-                    "all_elements": all_elements_context,
-                    "all_suggested_selectors": all_selectors
+                    "all_elements": all_elements_context
                 }
                 
-                state['history'].append(f"Step {state['step']}: ✅ Found {len(limited_result)} elements")
+                state['history'].append(f"Step {state['step']}: ⚡ Found {len(limited_result)} elements")
                 action_success = True
             else:
-                state['history'].append(f"Step {state['step']}: ❌ No elements found")
+                state['history'].append(f"Step {state['step']}: ❌ No elements found for '{search_text}'")
         
         # ==== USER INPUT REQUEST ====
         elif action_type == "request_user_input":
@@ -1375,73 +2129,21 @@ async def execute_action_node(state: AgentState) -> AgentState:
         # ==== FINISH ACTION ====
         elif action_type == "finish":
             action_success = True
-            state['history'].append(f"Step {state['step']}: 🏁 Finishing: {action.get('reason', 'Task complete')}")
+            state['history'].append(f"Step {state['step']}: 🏁 {action.get('reason', 'Complete')}")
         
         # SUCCESS PATH
         if action_success:
-            state['history'].append(f"Step {state['step']}: ✅ {action_type} successful")
-            await page.wait_for_timeout(300)
-            
-            # INTELLIGENT CAPTCHA HANDLING - Only check when likely to appear
-            # ✅ Upgraded with proven test.py CaptchaSolver system
-            if action_type in ["click", "press"]:
-                selector_lower = action.get("selector", "").lower()
-                should_check_captcha = any(kw in selector_lower for kw in [
-                    "submit", "login", "signin", "register", "sign-up", "checkout", 
-                    "purchase", "buy", "order", "form", "send", "contact"
-                ])
-                
-                if should_check_captcha:
-                    try:
-                        logger.info(f"🤖 Post-action CAPTCHA check with universal solver after {action_type}...")
-                        
-                        # Use the proven CaptchaSolver system from core.py (same as test.py)
-                        captcha_solver = CaptchaSolver()
-                        
-                        # Use the universal detection and solving system
-                        captcha_result = await captcha_solver.solve_captcha_universal(page,page.url)
-                        
-                        if captcha_result['found']:
-                            if captcha_result['solved']:
-                                state['history'].append(f"Step {state['step']}: 🔓 Post-action CAPTCHA auto-solved ({captcha_result['type']}) with universal solver")
-                                push_status(job_id, "captcha_auto_solved", {
-                                    "after_action": action_type, 
-                                    "type": captcha_result['type'],
-                                    "method": captcha_result['method'],
-                                    "solver": "universal_proven"
-                                })
-                            else:
-                                state['history'].append(f"Step {state['step']}: ⚠️ Post-action CAPTCHA failed: {captcha_result['error']}")
-                        
-                        await page.wait_for_timeout(1500)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Post-action CAPTCHA check failed (non-critical): {e}")
-                        state['history'].append(f"Step {state['step']}: ⚠️ CAPTCHA check error: {str(e)[:50]}")
-            
-            await page.wait_for_timeout(300)
+            state['history'].append(f"Step {state['step']}: ✅ {action_type}")
+            await page.wait_for_timeout(200)
         
     except Exception as e:
         error_msg = str(e)[:100]
-        state['history'].append(f"Step {state['step']}: ❌ FAILED {action_type}: {error_msg}")
+        state['history'].append(f"Step {state['step']}: ❌ {action_type}: {error_msg}")
         state['failed_actions'][action_signature] = state['failed_actions'].get(action_signature, 0) + 1
         push_status(job_id, "action_failed", {"action": action, "error": error_msg})
     
-    # ==== LOGIN FAILURE DETECTION (Only for login actions that succeeded) ====
-    if action_success and action_type in ["click", "press"]:
-        selector_lower = action.get("selector", "").lower()
-        if any(kw in selector_lower for kw in ["login", "signin", "submit", "sign-in"]):
-            try:
-                await page.wait_for_timeout(2000)
-                page_content = await page.content()
-                if detect_login_failure(page_content, page.url):
-                    state['history'].append(f"Step {state['step']}: 🚫 Login failure detected")
-                    push_status(job_id, "login_failure_detected", {"step": state['step']})
-            except:
-                pass
-    
     state['step'] += 1
     return state
-
 # ==================== SUPERVISOR ====================
 def supervisor_node(state: AgentState) -> str:
     """🎯 SUPERVISOR - Controls workflow continuation"""
@@ -1463,10 +2165,29 @@ builder = StateGraph(AgentState)
 builder.add_node("navigate", navigate_to_page)
 builder.add_node("reason", agent_reasoning_node)
 builder.add_node("execute", execute_action_node)
+builder.add_node("captcha_check", captcha_handler_node)  # 🆕 NEW NODE
+
+# Set entry point
 builder.set_entry_point("navigate")
-builder.add_edge("navigate", "reason")
-builder.add_conditional_edges("execute", supervisor_node, {END: END, "continue": "reason"})
+
+# Navigation flow: navigate -> captcha_check -> reason
+builder.add_edge("navigate", "captcha_check")
+builder.add_edge("captcha_check", "reason")
+
+# Main reasoning loop: reason -> execute -> captcha_check -> supervisor
 builder.add_edge("reason", "execute")
+builder.add_edge("execute", "captcha_check")
+
+# Supervisor decides: continue to reason or END
+builder.add_conditional_edges(
+    "captcha_check",
+    supervisor_node,
+    {
+        END: END,
+        "continue": "reason"
+    }
+)
+
 graph_app = builder.compile()
 
 # ==================== JOB ORCHESTRATOR ====================

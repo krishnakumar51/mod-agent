@@ -907,7 +907,7 @@ class CaptchaSolver:
                         }
                     }
                     
-                    // RECAPTCHA V2/V3 Detection
+                    // RECAPTCHA V2/V3 Detection - ENHANCED with iframe URL extraction
                     const recaptchaSelectors = [
                         '.g-recaptcha[data-sitekey]',
                         'iframe[src*="recaptcha"]',
@@ -918,14 +918,24 @@ class CaptchaSolver:
                     for (const selector of recaptchaSelectors) {
                         const elements = document.querySelectorAll(selector);
                         for (const element of elements) {
-                            const sitekey = element.getAttribute('data-sitekey');
+                            let sitekey = element.getAttribute('data-sitekey');
+                            
+                            // NEW: Extract sitekey from iframe src URL (for reCAPTCHA iframes)
+                            if (!sitekey && element.src && element.src.includes('recaptcha')) {
+                                const srcMatch = element.src.match(/[?&]k=([^&]+)/);
+                                if (srcMatch) {
+                                    sitekey = srcMatch[1];
+                                }
+                            }
+                            
                             if (sitekey && sitekey.length >= 30 && sitekey.startsWith('6L')) {
                                 results.push({
                                     type: 'recaptcha_v2',
                                     sitekey: sitekey,
                                     confidence: 90,
                                     method: 'js_recaptcha_detection',
-                                    selector: selector
+                                    selector: selector,
+                                    source: element.src ? 'iframe_url' : 'data_attribute'
                                 });
                             }
                         }
@@ -1000,18 +1010,31 @@ class CaptchaSolver:
                         'method': 'dom_scan'
                     }
             
-            # Scan for reCAPTCHA elements
+            # Scan for reCAPTCHA elements - ENHANCED with iframe URL extraction
             recaptcha_elements = await page.query_selector_all('.g-recaptcha, iframe[src*="recaptcha"]')
             for element in recaptcha_elements:
                 sitekey = await element.get_attribute('data-sitekey')
-                if sitekey and sitekey.startswith('6L'):
+                
+                # NEW: Extract sitekey from iframe src if data-sitekey not found
+                if not sitekey:
+                    src = await element.get_attribute('src')
+                    if src and 'recaptcha' in src:
+                        # Extract sitekey from URL parameter k=SITEKEY
+                        import re
+                        match = re.search(r'[?&]k=([^&]+)', src)
+                        if match:
+                            sitekey = match.group(1)
+                            print(f"🔍 Extracted sitekey from iframe URL: {sitekey}")
+                
+                if sitekey and sitekey.startswith('6L') and len(sitekey) >= 30:
                     print(f"✅ reCAPTCHA found via DOM: {sitekey}")
                     return {
                         'type': 'recaptcha_v2',
                         'sitekey': sitekey,
                         'confidence': 70,
                         'element': element,
-                        'method': 'dom_scan'
+                        'method': 'dom_scan',
+                        'source': 'iframe_url' if src else 'data_attribute'
                     }
             
         except Exception as e:
@@ -1215,11 +1238,32 @@ class CaptchaSolver:
                 }
                 
                 print(f"📤 Creating reCAPTCHA task...")
+                print(f"🔧 Request data: {create_data}")
+                
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+                
                 async with session.post(
                     f"{self.base_url}/createTask",
                     json=create_data,
+                    headers=headers,
                     timeout=30
                 ) as resp:
+                    print(f"📡 Response status: {resp.status}")
+                    print(f"📡 Response headers: {dict(resp.headers)}")
+                    
+                    # Check content type
+                    content_type = resp.headers.get('content-type', '')
+                    print(f"📡 Content-Type: {content_type}")
+                    
+                    if 'application/json' not in content_type:
+                        # Handle non-JSON response
+                        text_response = await resp.text()
+                        print(f"❌ Non-JSON response: {text_response[:500]}")
+                        return None
+                    
                     data = await resp.json()
                     
                 print(f"📡 CapSolver response: {data}")
@@ -1257,8 +1301,16 @@ class CaptchaSolver:
                             "clientKey": self.capsolver_key,
                             "taskId": task_id
                         },
+                        headers={
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
                         timeout=10
                     ) as resp:
+                        if 'application/json' not in resp.headers.get('content-type', ''):
+                            text_response = await resp.text()
+                            print(f"❌ Non-JSON response on getTaskResult: {text_response[:200]}")
+                            return None
                         data = await resp.json()
                     
                     print(f"� Attempt {attempt}: {data.get('status', 'unknown')}")
@@ -1810,37 +1862,143 @@ class CaptchaSolver:
                     print("✅ Turnstile token injected successfully!")
             
             elif captcha_type in ['recaptcha_v2', 'recaptcha_v3']:
-                # RECAPTCHA INJECTION - Multiple methods
+                # ENHANCED RECAPTCHA INJECTION - Multiple sophisticated methods for all reCAPTCHA types
                 recaptcha_success = await page.evaluate(f"""
                     (() => {{
                         let injected = false;
+                        const token = '{token}';
                         
-                        // Method 1: Standard reCAPTCHA response textareas
-                        const textareas = document.querySelectorAll('textarea[name="g-recaptcha-response"]');
-                        for (const textarea of textareas) {{
-                            textarea.style.display = 'block';
-                            textarea.value = '{token}';
-                            textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            injected = true;
-                        }}
+                        // Method 1: Standard reCAPTCHA response textareas (all variants)
+                        const textareaSelectors = [
+                            'textarea[name="g-recaptcha-response"]',
+                            'textarea[id*="recaptcha"]', 
+                            'textarea[class*="recaptcha"]',
+                            '#g-recaptcha-response',
+                            'textarea[name*="captcha"]'
+                        ];
                         
-                        // Method 2: Trigger reCAPTCHA callbacks
-                        if (window.grecaptcha && window.grecaptcha.getResponse) {{
-                            const widgets = document.querySelectorAll('.g-recaptcha');
-                            for (const widget of widgets) {{
-                                try {{
-                                    const callback = widget.getAttribute('data-callback');
-                                    if (callback && window[callback]) {{
-                                        window[callback]('{token}');
-                                        injected = true;
-                                    }}
-                                }} catch (e) {{
-                                    console.log('reCAPTCHA callback error:', e);
-                                }}
+                        for (const selector of textareaSelectors) {{
+                            const textareas = document.querySelectorAll(selector);
+                            for (const textarea of textareas) {{
+                                textarea.style.display = 'block';
+                                textarea.style.visibility = 'visible';
+                                textarea.value = token;
+                                textarea.innerHTML = token;
+                                
+                                // Trigger all possible events
+                                ['input', 'change', 'keyup', 'blur'].forEach(eventType => {{
+                                    textarea.dispatchEvent(new Event(eventType, {{ bubbles: true, cancelable: true }}));
+                                }});
+                                
+                                injected = true;
+                                console.log('reCAPTCHA textarea injected:', selector);
                             }}
                         }}
                         
+                        // Method 2: Enhanced Callback Triggering
+                        if (window.grecaptcha) {{
+                            // Try to get all widget IDs and set response
+                            try {{
+                                const widgets = document.querySelectorAll('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]');
+                                widgets.forEach((widget, index) => {{
+                                    try {{
+                                        // Try to get widget ID and set response directly
+                                        if (window.grecaptcha.getResponse) {{
+                                            const widgetId = widget.getAttribute('data-widget-id') || index;
+                                            
+                                            // Override the getResponse function temporarily
+                                            const originalGetResponse = window.grecaptcha.getResponse;
+                                            window.grecaptcha.getResponse = () => token;
+                                            
+                                            // Try callback methods
+                                            const callback = widget.getAttribute('data-callback') || 
+                                                           widget.getAttribute('callback') ||
+                                                           widget.dataset.callback;
+                                                           
+                                            if (callback) {{
+                                                if (typeof window[callback] === 'function') {{
+                                                    window[callback](token);
+                                                    injected = true;
+                                                    console.log('Callback triggered:', callback);
+                                                }}
+                                                
+                                                // Try as object method
+                                                if (callback.includes('.')) {{
+                                                    const parts = callback.split('.');
+                                                    let obj = window;
+                                                    for (let i = 0; i < parts.length - 1; i++) {{
+                                                        if (obj[parts[i]]) obj = obj[parts[i]];
+                                                    }}
+                                                    if (obj && typeof obj[parts[parts.length - 1]] === 'function') {{
+                                                        obj[parts[parts.length - 1]](token);
+                                                        injected = true;
+                                                        console.log('Object callback triggered:', callback);
+                                                    }}
+                                                }}
+                                            }}
+                                            
+                                            // Restore original function
+                                            setTimeout(() => {{
+                                                window.grecaptcha.getResponse = originalGetResponse;
+                                            }}, 1000);
+                                        }}
+                                    }} catch (e) {{
+                                        console.log('Widget callback error:', e);
+                                    }}
+                                }});
+                            }} catch (e) {{
+                                console.log('grecaptcha error:', e);
+                            }}
+                        }}
+                        
+                        // Method 3: Find and trigger form submission callbacks
+                        const forms = document.querySelectorAll('form');
+                        forms.forEach(form => {{
+                            try {{
+                                const captchaElements = form.querySelectorAll('[data-sitekey], .g-recaptcha, iframe[src*="recaptcha"]');
+                                if (captchaElements.length > 0) {{
+                                    // Look for submit buttons and check if they become enabled
+                                    const submitButtons = form.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type])');
+                                    submitButtons.forEach(btn => {{
+                                        if (btn.disabled) {{
+                                            btn.disabled = false;
+                                            btn.style.opacity = '1';
+                                            btn.style.pointerEvents = 'auto';
+                                            console.log('Submit button enabled');
+                                            injected = true;
+                                        }}
+                                    }});
+                                }}
+                            }} catch (e) {{
+                                console.log('Form callback error:', e);
+                            }}
+                        }});
+                        
+                        // Method 4: Direct DOM manipulation for checkmark
+                        try {{
+                            const recaptchaFrames = document.querySelectorAll('iframe[src*="recaptcha/api2/anchor"]');
+                            recaptchaFrames.forEach(frame => {{
+                                try {{
+                                    // Try to access frame content (may be blocked by CORS)
+                                    if (frame.contentDocument) {{
+                                        const checkbox = frame.contentDocument.querySelector('.recaptcha-checkbox-checkmark');
+                                        if (checkbox) {{
+                                            checkbox.style.display = 'block';
+                                            checkbox.classList.add('recaptcha-checkbox-checked');
+                                            injected = true;
+                                            console.log('Checkbox visual updated');
+                                        }}
+                                    }}
+                                }} catch (e) {{
+                                    // Expected CORS error, but we tried
+                                    console.log('Frame access blocked (normal):', e.message);
+                                }}
+                            }});
+                        }} catch (e) {{
+                            console.log('Frame manipulation error:', e);
+                        }}
+                        
+                        console.log('reCAPTCHA injection methods completed, injected:', injected);
                         return injected;
                     }})()
                 """)
@@ -1945,6 +2103,7 @@ class CaptchaSolver:
                     'solved': True,
                     'type': captcha_info['type'],
                     'method': solve_method,
+                    'token': token,
                     'error': None
                 }
             else:
